@@ -1,0 +1,3 @@
+[submodule "coproc-core"]
+	path = coproc-core
+	url = https://github.com/WL-hosted/wl-hosted-coproc-core.git

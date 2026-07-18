@@ -60,6 +60,10 @@ typedef struct usb_transport {
     TaskHandle_t tx_task;
     TaskHandle_t rx_task;
     atomic_bool stopping;
+    /* Set on the first failed transfer; cleared when the host configures
+     * the device again. Prevents restart cascades while the stack is
+     * already re-enumerating or the cable is unplugged. */
+    atomic_bool restart_pending;
     uint32_t rx_overruns;
 
     uint8_t rx_frame[FRAME_HEADER_SIZE + 4096u];
@@ -260,6 +264,28 @@ static void flush_tx_queue(int status) {
     }
 }
 
+static void usb_event_handler(uint8_t busid, uint8_t event);
+
+static void usb_stack_register(void) {
+    usbd_desc_register(WLH_USB_BUS_ID, &usb_descriptors);
+    usbd_add_interface(WLH_USB_BUS_ID, &vendor_interface);
+    usbd_add_endpoint(WLH_USB_BUS_ID, &out_endpoint);
+    usbd_add_endpoint(WLH_USB_BUS_ID, &in_endpoint);
+}
+
+/* A bulk IN transfer that never completes means the host went away without
+ * a bus reset (e.g. the host process closed libusb while a write was
+ * armed). Detaching and re-attaching the controller forces a fresh
+ * enumeration, which drives the standard RESET/CONFIGURED recovery path. */
+static void usb_stack_restart(void) {
+    ESP_LOGW(TAG, "restarting usb device stack");
+    (void)usbd_deinitialize(WLH_USB_BUS_ID);
+    vTaskDelay(pdMS_TO_TICKS(50u));
+    usb_stack_register();
+    if (usbd_initialize(WLH_USB_BUS_ID, ESP_USBD_BASE, usb_event_handler) != 0)
+        ESP_LOGE(TAG, "usb stack restart failed");
+}
+
 static void tx_task_main(void *argument) {
     tx_job_t job;
     (void)argument;
@@ -290,6 +316,9 @@ static void tx_task_main(void *argument) {
             pdTRUE,
             portMAX_DELAY
         );
+        /* Drop stale IN completions from transfers that already timed out,
+         * so the wait below only observes the current transfer. */
+        (void)xSemaphoreTake(transport.tx_done, 0);
         if (usbd_ep_start_write(
                 WLH_USB_BUS_ID, WLH_USB_EP_IN, job.frame, job.size
             ) != 0) {
@@ -301,6 +330,13 @@ static void tx_task_main(void *argument) {
             status = -1;
         }
         job.completion(job.completion_context, job.frame, job.size, status);
+        if (status != 0 && !atomic_exchange(&transport.restart_pending, true)) {
+            /* A failed transfer means the host went away without a bus
+             * reset, or the controller is wedged. Detach and re-attach to
+             * force a fresh enumeration; the Core enters FAILED on the
+             * completion above and restarts via the RESET event. */
+            usb_stack_restart();
+        }
     }
 }
 
@@ -321,6 +357,7 @@ static void usb_event_handler(uint8_t busid, uint8_t event) {
         }
         break;
     case USBD_EVENT_CONFIGURED:
+        atomic_store(&transport.restart_pending, false);
         xEventGroupSetBitsFromISR(
             transport.events, WLH_USB_CONFIGURED_BIT, &woken
         );
@@ -387,10 +424,7 @@ int wlh_usb_transport_start(const wlh_usb_transport_config_t *config) {
     }
 
     fill_serial_string();
-    usbd_desc_register(WLH_USB_BUS_ID, &usb_descriptors);
-    usbd_add_interface(WLH_USB_BUS_ID, &vendor_interface);
-    usbd_add_endpoint(WLH_USB_BUS_ID, &out_endpoint);
-    usbd_add_endpoint(WLH_USB_BUS_ID, &in_endpoint);
+    usb_stack_register();
     if (usbd_initialize(WLH_USB_BUS_ID, ESP_USBD_BASE, usb_event_handler) !=
         0) {
         ESP_LOGE(TAG, "usbd_initialize failed");

@@ -14,7 +14,7 @@
 #include "user_passthrough.h"
 #include "wifi_backend.h"
 #include "wlh/coproc.h"
-#include "wlh_freertos_osal.h"
+#include "wlh/freertos_osal.h"
 
 #define LINK_EVENT_USB_RESET (1u << 0)
 

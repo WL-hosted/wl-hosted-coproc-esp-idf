@@ -24,7 +24,8 @@ User-Passthrough raw stream channel are intentionally not implemented.
 ```text
 main/
 ├── app_main.c            # assembly: core config, tasks, lifecycle
-├── wlh_freertos_osal.c/h # FreeRTOS OSAL (all 30 wlh_osal ops)
+├── coproc-core/common/osal/src/freertos_osal.c # FreeRTOS OSAL (all 30 wlh_osal ops)
+├── coproc-core/common/osal/include/wlh/freertos_osal.h # FreeRTOS OSAL header
 ├── transport_usb.c/h     # CherryUSB bulk transport + frame reassembly
 ├── wifi_backend.c/h      # esp_wifi STA backend (ops + events + L2 path)
 ├── device_info.c/h       # Device Information provider

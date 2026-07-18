@@ -5,7 +5,6 @@ idf_component_register(
         "transport_usb.c"
         "user_passthrough.c"
         "wifi_backend.c"
-        "wlh_freertos_osal.c"
     INCLUDE_DIRS
         "."
     PRIV_REQUIRES
@@ -27,3 +26,7 @@ add_subdirectory(
     EXCLUDE_FROM_ALL
 )
 target_link_libraries(${COMPONENT_LIB} PUBLIC wlh_coproc_core)
+
+# FreeRTOS OSAL from Common.
+wlh_common_enable_freertos_osal()
+target_link_libraries(${COMPONENT_LIB} PUBLIC wlh::freertos_osal)

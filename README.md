@@ -1,6 +1,6 @@
 # WL-hosted Coprocessor ESP-IDF Adapter
 
-`wl-hosted-coproc-esp-idf` 是 WL-hosted 的 ESP32-S3 协处理器固件。它将平台无关的 `wl-hosted-coproc-core` 适配到 ESP-IDF：使用 FreeRTOS OSAL、CherryUSB 设备 bulk 传输，以及 `esp_wifi` STA 后端。固件配置文件（profile）为 `espressif.esp32s3.coreboard.usb-wifi`。
+`wl-hosted-coproc-esp-idf` 是 WL-hosted 的 ESP32-S3 协处理器固件。它将平台无关的 `wl-hosted-coproc-core` 适配到 ESP-IDF：使用 FreeRTOS OSAL、CherryUSB 设备 bulk 传输，以及 `esp_wifi` STA/SoftAP 后端。固件配置文件（profile）为 `espressif.esp32s3.coreboard.usb-wifi`。
 
 ```text
 Host（POSIX host-sim over USB bulk）
@@ -8,7 +8,7 @@ Host（POSIX host-sim over USB bulk）
 ESP32-S3（本固件）
   ├─ CherryUSB device，vendor 接口，bulk OUT 0x01 / bulk IN 0x81
   ├─ wl-hosted-coproc-core（link/session/credit/RPC，FreeRTOS OSAL）
-  └─ esp_wifi STA 后端 + Device Information + User Passthrough
+  └─ esp_wifi STA/SoftAP 后端 + Device Information + User Passthrough
 ```
 
 ## 1. 仓库定位
@@ -97,7 +97,7 @@ idf.py fullclean
 | `coproc-core/common/osal/src/freertos_osal.c` | FreeRTOS OSAL 适配，实现全部 `wlh_osal` 操作。 |
 | `coproc-core/common/osal/include/wlh/freertos_osal.h` | FreeRTOS OSAL 公共头文件。 |
 | `main/transport_usb.c/h` | CherryUSB 设备 bulk 传输实现，包括帧重组、TX 提交与总线复位处理。 |
-| `main/wifi_backend.c/h` | `esp_wifi` STA 后端，包括初始化、扫描、连接、断开与 Ethernet TX 路径。 |
+| `main/wifi_backend.c/h` | `esp_wifi` STA/SoftAP 后端，包括初始化、扫描、连接、断开、start_ap/stop_ap、AP client 事件上报与 Ethernet TX 路径。 |
 | `main/device_info.c/h` | Device Information 服务提供者。 |
 | `main/user_passthrough.c/h` | User Passthrough 服务实现（RPC SEND + 可选 RESULT 事件回显）。 |
 | `main/CMakeLists.txt` | ESP-IDF component 注册与 Coproc Core 子目录引入。 |
@@ -139,7 +139,10 @@ USB 总线复位或重新枚举时，固件会：
 
 当前已实现：
 
-- **Wi-Fi**：initialize、scan、connect、disconnect，以及 Ethernet TX/RX。
+- **Wi-Fi**：initialize、scan、connect、disconnect、start_ap、stop_ap，以及 Ethernet TX/RX（STA 接口）。
+  - 固件以 `WIFI_MODE_APSTA` 运行，STA 与 SoftAP 并存。SoftAP 支持 WPA2/WPA3/开放网络（空密码即开放），`max_clients` 上限 10。
+  - 注意：ESP32 在 APSTA 模式下，一旦 STA 关联成功，SoftAP 信道会跟随 STA 信道；显式配置的 AP 信道可能被覆盖。
+  - AP client 加入/离开通过 `WifiApClientJoinedEvent`（`0x8005`）/ `WifiApClientLeftEvent`（`0x8006`）上报。
 - **Device Information**：返回厂商、MCU 型号、板级 profile、UID 等信息。
 - **User Passthrough**：处理 RPC SEND，可返回可选的 RESULT 事件。
 

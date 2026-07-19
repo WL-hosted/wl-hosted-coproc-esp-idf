@@ -9,6 +9,8 @@
 #include "esp_wifi_types.h"
 
 #define WLH_WIFI_SCAN_MAX_RESULTS 24u
+#define WLH_WIFI_AP_MAX_CLIENTS 10u
+#define WLH_WIFI_AP_DEFAULT_MAX_CLIENTS 4u
 
 #define WIFI_SECURITY_OPEN 1u
 #define WIFI_SECURITY_WEP 2u
@@ -36,6 +38,7 @@ typedef struct wifi_backend {
     bool driver_started;
     bool connected;
     bool disconnect_locally;
+    bool ap_active;
 } wifi_backend_t;
 
 static wifi_backend_t backend;
@@ -182,6 +185,22 @@ static void wifi_event_handler(
         break;
     }
 
+    case WIFI_EVENT_AP_STACONNECTED: {
+        wifi_event_ap_staconnected_t *event = data;
+        (void)wlh_coproc_wifi_ap_client_joined(
+            backend.coproc, event->mac, 0, event->aid
+        );
+        break;
+    }
+
+    case WIFI_EVENT_AP_STADISCONNECTED: {
+        wifi_event_ap_stadisconnected_t *event = data;
+        (void)wlh_coproc_wifi_ap_client_left(
+            backend.coproc, event->mac, event->aid, event->reason
+        );
+        break;
+    }
+
     default:
         break;
     }
@@ -195,7 +214,7 @@ int wlh_wifi_backend_init(wlh_coproc_t *coproc) {
     backend.coproc = coproc;
     if (esp_wifi_init(&config) != ESP_OK ||
         esp_wifi_set_storage(WIFI_STORAGE_RAM) != ESP_OK ||
-        esp_wifi_set_mode(WIFI_MODE_STA) != ESP_OK ||
+        esp_wifi_set_mode(WIFI_MODE_APSTA) != ESP_OK ||
         esp_event_handler_register(
             WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL
         ) != ESP_OK) {
@@ -267,6 +286,61 @@ int wlh_wifi_backend_disconnect(void *context) {
         return -1;
     backend.disconnect_locally = true;
     return esp_wifi_disconnect() == ESP_OK ? 0 : -1;
+}
+
+int wlh_wifi_backend_start_ap(
+    void *context, const wlh_coproc_wifi_ap_t *request
+) {
+    wifi_config_t config;
+    (void)context;
+    if (!backend.driver_started || request == NULL ||
+        request->ssid_size == 0u || request->ssid_size > 32u ||
+        request->credential_size > 63u ||
+        request->max_clients > WLH_WIFI_AP_MAX_CLIENTS) {
+        return -1;
+    }
+    memset(&config, 0, sizeof(config));
+    memcpy(config.ap.ssid, request->ssid, request->ssid_size);
+    /* The SSID is not NUL-terminated; the length must be explicit. */
+    config.ap.ssid_len = (uint8_t)request->ssid_size;
+    memcpy(config.ap.password, request->credential, request->credential_size);
+    if (request->credential_size == 0u ||
+        request->security == WIFI_SECURITY_OPEN) {
+        config.ap.authmode = WIFI_AUTH_OPEN;
+    } else if (request->security == WIFI_SECURITY_WPA3_SAE) {
+        config.ap.authmode = WIFI_AUTH_WPA3_PSK;
+    } else {
+        config.ap.authmode = WIFI_AUTH_WPA2_PSK;
+    }
+    /* Channel 0 lets the driver pick; in APSTA mode the SoftAP follows the
+     * STA channel once the STA connects. */
+    config.ap.channel = (uint8_t)request->channel;
+    config.ap.max_connection =
+        (uint8_t)(request->max_clients == 0u ? WLH_WIFI_AP_DEFAULT_MAX_CLIENTS
+                                             : request->max_clients);
+    config.ap.pmf_cfg.capable = true;
+    config.ap.pmf_cfg.required = false;
+    /* esp_wifi_set_config requires the AP interface to be enabled; restore
+     * the mode first if a previous stop_ap tore it down. */
+    if (!backend.ap_active && esp_wifi_set_mode(WIFI_MODE_APSTA) != ESP_OK) {
+        return -1;
+    }
+    if (esp_wifi_set_config(WIFI_IF_AP, &config) != ESP_OK)
+        return -1;
+    backend.ap_active = true;
+    return 0;
+}
+
+int wlh_wifi_backend_stop_ap(void *context) {
+    (void)context;
+    if (!backend.ap_active)
+        return -1;
+    /* Drop to STA-only mode: tears down the AP interface and disconnects
+     * its clients while keeping the STA alive. */
+    if (esp_wifi_set_mode(WIFI_MODE_STA) != ESP_OK)
+        return -1;
+    backend.ap_active = false;
+    return 0;
 }
 
 void wlh_wifi_backend_ethernet_tx(

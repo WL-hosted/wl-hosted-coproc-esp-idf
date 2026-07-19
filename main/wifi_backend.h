@@ -8,9 +8,10 @@ extern "C" {
 #endif
 
 /*
- * esp_wifi STA backend for the Coprocessor Core. The wifi ops are
- * nonblocking submissions; scan/connect/initialize results reach the Core
- * through the wlh_coproc_wifi_* ingress APIs from the Wi-Fi event handler.
+ * esp_wifi STA+SoftAP backend for the Coprocessor Core. The wifi ops are
+ * nonblocking submissions; scan/connect/initialize results and SoftAP client
+ * join/leave events reach the Core through the wlh_coproc_wifi_* ingress APIs
+ * from the Wi-Fi event handler.
  */
 
 /* Registers the Wi-Fi event handler and the STA receive callback. The
@@ -24,6 +25,10 @@ int wlh_wifi_backend_connect(
     void *context, const wlh_coproc_wifi_connect_t *request
 );
 int wlh_wifi_backend_disconnect(void *context);
+int wlh_wifi_backend_start_ap(
+    void *context, const wlh_coproc_wifi_ap_t *request
+);
+int wlh_wifi_backend_stop_ap(void *context);
 
 /* wlh_coproc_ethernet_rx_fn: forwards a Host frame to the AP. Runs on the
  * Core task and returns immediately; frames are dropped when not

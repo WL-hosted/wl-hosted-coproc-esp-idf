@@ -88,7 +88,9 @@ void app_main(void) {
                                           wlh_wifi_backend_initialize,
                                           wlh_wifi_backend_scan,
                                           wlh_wifi_backend_connect,
-                                          wlh_wifi_backend_disconnect};
+                                          wlh_wifi_backend_disconnect,
+                                          wlh_wifi_backend_start_ap,
+                                          wlh_wifi_backend_stop_ap};
     config.device_info = wlh_device_info_ops();
     config.user_passthrough = wlh_user_passthrough_ops(&coproc);
     config.max_frame_size = 4096u;

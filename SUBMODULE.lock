@@ -1,4 +1,4 @@
 coproc-core.url=https://github.com/WL-hosted/wl-hosted-coproc-core.git
-coproc-core.commit=fbecfcce1162bd2c8993b682ebb90a61673f82e2
+coproc-core.commit=385b5f3f443e2957f6945809c97bc800aa65b7a8
 protocol.transitive.commit=f222469f1dc871f2260f1bbcb8811cadf44792de
-common.transitive.commit=b2583ca5249bc93c9655c4896a6aa4c8a8f9b0d4
+common.transitive.commit=5d5cb77ebd6176f1ce578b34ba907c90b53b9c77

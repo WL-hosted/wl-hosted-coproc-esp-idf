@@ -21,8 +21,8 @@ idf_component_register(
 # ESP-IDF build.
 set(BUILD_TESTING OFF)
 add_subdirectory(
-    ${CMAKE_CURRENT_SOURCE_DIR}/../coproc-core
-    ${CMAKE_BINARY_DIR}/coproc-core-build
+    ${CMAKE_CURRENT_SOURCE_DIR}/../core/coproc-core
+    ${CMAKE_BINARY_DIR}/core-coproc-build
     EXCLUDE_FROM_ALL
 )
 target_link_libraries(${COMPONENT_LIB} PUBLIC wlh_coproc_core)

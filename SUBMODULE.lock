@@ -1,4 +1,2 @@
-coproc-core.url=https://github.com/WL-hosted/wl-hosted-coproc-core.git
-coproc-core.commit=385b5f3f443e2957f6945809c97bc800aa65b7a8
-protocol.transitive.commit=f222469f1dc871f2260f1bbcb8811cadf44792de
-common.transitive.commit=5d5cb77ebd6176f1ce578b34ba907c90b53b9c77
+core.url=https://github.com/WL-hosted/wl-hosted-core.git
+core.commit=49d5721522b7ece75ab830ed3525106ec1e92b76

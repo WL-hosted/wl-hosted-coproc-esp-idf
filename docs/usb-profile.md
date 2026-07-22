@@ -2,7 +2,7 @@
 
 WL-hosted USB transport binding profile for the ESP32-S3 Coprocessor
 firmware built from this repository. Follows
-`wl-hosted-protocol/spec/transports/usb.md`.
+`core/protocol/spec/transports/usb.md`.
 
 ## Enumeration
 

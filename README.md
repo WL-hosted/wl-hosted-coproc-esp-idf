@@ -1,13 +1,13 @@
 # WL-hosted Coprocessor ESP-IDF Adapter
 
-`wl-hosted-coproc-esp-idf` 是 WL-hosted 的 ESP32-S3 协处理器固件。它将平台无关的 `wl-hosted-coproc-core` 适配到 ESP-IDF：使用 FreeRTOS OSAL、CherryUSB 设备 bulk 传输，以及 `esp_wifi` STA/SoftAP 后端。固件配置文件（profile）为 `espressif.esp32s3.coreboard.usb-wifi`。
+`wl-hosted-coproc-esp-idf` 是 WL-hosted 的 ESP32-S3 协处理器固件。它将 `core/coproc-core` 适配到 ESP-IDF：使用 FreeRTOS OSAL、CherryUSB 设备 bulk 传输，以及 `esp_wifi` STA/SoftAP 后端。固件配置文件（profile）为 `espressif.esp32s3.coreboard.usb-wifi`。
 
 ```text
 Host（POSIX host-sim over USB bulk）
   ↕ 原始 WL-hosted 帧（24 字节 wire header，无额外封装）
 ESP32-S3（本固件）
   ├─ CherryUSB device，vendor 接口，bulk OUT 0x01 / bulk IN 0x81
-  ├─ wl-hosted-coproc-core（link/session/credit/RPC，FreeRTOS OSAL）
+  ├─ core/coproc-core（link/session/credit/RPC，FreeRTOS OSAL）
   └─ esp_wifi STA/SoftAP 后端 + Device Information + User Passthrough
 ```
 
@@ -16,13 +16,14 @@ ESP32-S3（本固件）
 在 WL-hosted 多仓库工作区中，各仓库的职责边界如下：
 
 ```text
-wl-hosted-coproc-esp-idf -> wl-hosted-coproc-core -> wl-hosted-protocol
-                                                       -> wl-hosted-common
+wl-hosted-coproc-esp-idf -> wl-hosted-core/coproc-core
+                           -> wl-hosted-core/protocol
+                           -> wl-hosted-core/common
 ```
 
-- `wl-hosted-coproc-core`：平台无关的 Coproc Core，包含标准 WL-hosted v1 协议状态机（Hello、Session、Credit、Channel、Heartbeat 等）。
-- `wl-hosted-protocol`：标准 Wire/RPC codec 以及 Simulator IPC sideband protobuf；本固件在构建时通过 nanopb 生成 C 代码。
-- `wl-hosted-common`：共享平台契约，OSAL 唯一来源位于 `osal/include/wlh/osal.h`。
+- `core/coproc-core`：平台无关的 Coproc Core，包含标准 WL-hosted v1 协议状态机（Hello、Session、Credit、Channel、Heartbeat 等）。
+- `core/protocol`：标准 Wire/RPC codec 以及 Simulator IPC sideband protobuf；本固件在构建时通过 nanopb 生成 C 代码。
+- `core/common`：共享平台契约，OSAL 唯一来源位于 `osal/include/wlh/osal.h`。
 
 本仓库是真实硬件固件，不是模拟器。它与 macOS Host Sim 的区别在于：
 
@@ -87,22 +88,22 @@ idf.py fullclean
 - 本版本不使用 `AGGREGATED` flag，每帧只携带一个 payload。
 - 协商的 `max_frame_size` 为 4096 字节（含 header）。默认 checksum 使用 SUM32，后续可协商启用 CRC32C。
 
-详细规则见 `docs/usb-profile.md` 与 `wl-hosted-protocol/spec/transports/usb.md`。
+详细规则见 `docs/usb-profile.md` 与 `core/protocol/spec/transports/usb.md`。
 
 ## 5. 代码结构
 
 | 路径 | 说明 |
 |------|------|
 | `main/app_main.c` | 程序入口：初始化 NVS、网络栈、事件循环，配置并启动 Coproc Core、Wi-Fi 后端、USB 传输与链路控制任务。 |
-| `coproc-core/common/osal/src/freertos_osal.c` | FreeRTOS OSAL 适配，实现全部 `wlh_osal` 操作。 |
-| `coproc-core/common/osal/include/wlh/freertos_osal.h` | FreeRTOS OSAL 公共头文件。 |
+| `core/common/osal/src/freertos_osal.c` | FreeRTOS OSAL 适配，实现全部 `wlh_osal` 操作。 |
+| `core/common/osal/include/wlh/freertos_osal.h` | FreeRTOS OSAL 公共头文件。 |
 | `main/transport_usb.c/h` | CherryUSB 设备 bulk 传输实现，包括帧重组、TX 提交与总线复位处理。 |
 | `main/wifi_backend.c/h` | `esp_wifi` STA/SoftAP 后端，包括初始化、扫描、连接、断开、start_ap/stop_ap、AP client 事件上报与 Ethernet TX 路径。 |
 | `main/device_info.c/h` | Device Information 服务提供者。 |
 | `main/user_passthrough.c/h` | User Passthrough 服务实现（RPC SEND + 可选 RESULT 事件回显）。 |
 | `main/CMakeLists.txt` | ESP-IDF component 注册与 Coproc Core 子目录引入。 |
 | `main/idf_component.yml` | IDF component 依赖声明：`cherry-embedded/cherryusb` 1.6.1。 |
-| `coproc-core/` | `wl-hosted-coproc-core` submodule（内部嵌套 protocol/ 与 common/）。 |
+| `core/` | `wl-hosted-core` submodule（包含 protocol/、common/、host-core/ 与 coproc-core/）。 |
 | `docs/usb-profile.md` | USB binding profile 详细说明。 |
 | `sdkconfig.defaults` | 默认 sdkconfig：FreeRTOS 1000 Hz、启用 CherryUSB 设备栈。 |
 | `dependencies.lock` | IDF component manager 锁定的依赖版本。 |
@@ -177,16 +178,15 @@ USB 总线复位或热插拔时，Host Sim 会重新打开设备并重启链路�
 
 本目录是独立 Git 仓库。修改后应单独提交，不要在工作区根目录执行全局 `git` 操作。
 
-本仓库依赖的 `coproc-core` 子模块信息记录在：
+本仓库依赖的 `core` 子模块信息记录在：
 
 - `.gitmodules`
-- `coproc-core/` gitlink
+- `core/` gitlink
 - `SUBMODULE.lock`
 
 更新子模块后应同步 `SUBMODULE.lock` 中的 commit，并确保：
 
-- `coproc-core.commit` 与 gitlink 一致。
-- `protocol.transitive.commit` 和 `common.transitive.commit` 反映 coproc-core 嵌套依赖的实际 commit。
+- `core.commit` 与 gitlink 一致。
 
 完成后执行：
 

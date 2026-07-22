@@ -252,7 +252,11 @@ int wlh_usb_transport_submit_tx(
     job.completion_context = completion_context;
     if (atomic_load(&transport.stopping))
         return -1;
-    return xQueueSend(transport.tx_queue, &job, 0) == pdTRUE ? 0 : -1;
+    if (xQueueSend(transport.tx_queue, &job, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "tx queue full: dropping %u bytes", (unsigned)size);
+        return -1;
+    }
+    return 0;
 }
 
 static void flush_tx_queue(int status) {
@@ -278,7 +282,12 @@ static void usb_stack_register(void) {
  * armed). Detaching and re-attaching the controller forces a fresh
  * enumeration, which drives the standard RESET/CONFIGURED recovery path. */
 static void usb_stack_restart(void) {
-    ESP_LOGW(TAG, "restarting usb device stack");
+    ESP_LOGW(
+        TAG,
+        "restarting usb device stack (queue=%u, overruns=%lu)",
+        (unsigned)uxQueueMessagesWaiting(transport.tx_queue),
+        (unsigned long)transport.rx_overruns
+    );
     (void)usbd_deinitialize(WLH_USB_BUS_ID);
     vTaskDelay(pdMS_TO_TICKS(50u));
     usb_stack_register();
@@ -319,15 +328,35 @@ static void tx_task_main(void *argument) {
         /* Drop stale IN completions from transfers that already timed out,
          * so the wait below only observes the current transfer. */
         (void)xSemaphoreTake(transport.tx_done, 0);
+        TickType_t started = xTaskGetTickCount();
+        ESP_LOGI(
+            TAG,
+            "tx begin: %u bytes (queue=%u)",
+            (unsigned)job.size,
+            (unsigned)uxQueueMessagesWaiting(transport.tx_queue)
+        );
         if (usbd_ep_start_write(
                 WLH_USB_BUS_ID, WLH_USB_EP_IN, job.frame, job.size
             ) != 0) {
+            ESP_LOGW(
+                TAG, "bulk IN write rejected (%u bytes)", (unsigned)job.size
+            );
             status = -1;
         } else if (xSemaphoreTake(
                        transport.tx_done, pdMS_TO_TICKS(WLH_USB_TX_TIMEOUT_MS)
                    ) != pdTRUE) {
-            ESP_LOGW(TAG, "bulk IN transfer timed out");
+            ESP_LOGW(
+                TAG, "bulk IN transfer timed out (%u bytes)", (unsigned)job.size
+            );
             status = -1;
+        } else {
+            ESP_LOGI(
+                TAG,
+                "tx done: %u bytes in %lu ms",
+                (unsigned)job.size,
+                (unsigned long)((xTaskGetTickCount() - started) *
+                                portTICK_PERIOD_MS)
+            );
         }
         job.completion(job.completion_context, job.frame, job.size, status);
         if (status != 0 && !atomic_exchange(&transport.restart_pending, true)) {

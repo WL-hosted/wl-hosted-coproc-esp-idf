@@ -104,6 +104,12 @@ static void report_scan_done(void) {
     (void)esp_wifi_scan_get_ap_num(&ap_count);
     if (ap_count > WLH_WIFI_SCAN_MAX_RESULTS)
         ap_count = WLH_WIFI_SCAN_MAX_RESULTS;
+    ESP_LOGI(
+        TAG,
+        "scan done: %u AP(s) (id=%lu)",
+        (unsigned)ap_count,
+        (unsigned long)backend.scan_id
+    );
     records = calloc(ap_count == 0u ? 1u : ap_count, sizeof(*records));
     if (records == NULL) {
         (void)wlh_coproc_wifi_scan_completed(
@@ -131,6 +137,7 @@ static void report_scan_done(void) {
     (void)wlh_coproc_wifi_scan_completed(
         backend.coproc, backend.scan_id, ap_count, false
     );
+    ESP_LOGI(TAG, "scan results reported (%u sent)", (unsigned)ap_count);
     free(records);
 }
 
@@ -141,6 +148,7 @@ static void wifi_event_handler(
     (void)base;
     switch (id) {
     case WIFI_EVENT_STA_START:
+        ESP_LOGI(TAG, "STA started");
         if (backend.initialize_operation_id != 0u) {
             uint32_t operation_id = backend.initialize_operation_id;
             backend.initialize_operation_id = 0u;
@@ -166,6 +174,13 @@ static void wifi_event_handler(
             bss.rssi_dbm = ap_info.rssi;
             bss.security = map_security(ap_info.authmode);
         }
+        ESP_LOGI(
+            TAG,
+            "connected: ssid=%.*s channel=%u",
+            (int)event->ssid_len,
+            (const char *)event->ssid,
+            (unsigned)event->channel
+        );
         (void)wlh_coproc_wifi_connected(backend.coproc, &bss);
         break;
     }
@@ -187,6 +202,17 @@ static void wifi_event_handler(
 
     case WIFI_EVENT_AP_STACONNECTED: {
         wifi_event_ap_staconnected_t *event = data;
+        ESP_LOGI(
+            TAG,
+            "AP client joined: mac=%02x:%02x:%02x:%02x:%02x:%02x aid=%u",
+            event->mac[0],
+            event->mac[1],
+            event->mac[2],
+            event->mac[3],
+            event->mac[4],
+            event->mac[5],
+            (unsigned)event->aid
+        );
         (void)wlh_coproc_wifi_ap_client_joined(
             backend.coproc, event->mac, 0, event->aid
         );
@@ -195,6 +221,19 @@ static void wifi_event_handler(
 
     case WIFI_EVENT_AP_STADISCONNECTED: {
         wifi_event_ap_stadisconnected_t *event = data;
+        ESP_LOGI(
+            TAG,
+            "AP client left: mac=%02x:%02x:%02x:%02x:%02x:%02x aid=%u "
+            "reason=%u",
+            event->mac[0],
+            event->mac[1],
+            event->mac[2],
+            event->mac[3],
+            event->mac[4],
+            event->mac[5],
+            (unsigned)event->aid,
+            (unsigned)event->reason
+        );
         (void)wlh_coproc_wifi_ap_client_left(
             backend.coproc, event->mac, event->aid, event->reason
         );
@@ -245,8 +284,11 @@ int wlh_wifi_backend_scan(void *context, uint32_t scan_id) {
     (void)context;
     if (!backend.driver_started)
         return -1;
-    if (esp_wifi_scan_start(NULL, false) != ESP_OK)
+    if (esp_wifi_scan_start(NULL, false) != ESP_OK) {
+        ESP_LOGW(TAG, "scan start failed (id=%lu)", (unsigned long)scan_id);
         return -1;
+    }
+    ESP_LOGI(TAG, "scan started (id=%lu)", (unsigned long)scan_id);
     backend.scan_id = scan_id;
     return 0;
 }
@@ -277,6 +319,12 @@ int wlh_wifi_backend_connect(
     if (esp_wifi_set_config(WIFI_IF_STA, &config) != ESP_OK)
         return -1;
     backend.disconnect_locally = false;
+    ESP_LOGI(
+        TAG,
+        "connect requested: ssid=%.*s",
+        (int)request->ssid_size,
+        (const char *)request->ssid
+    );
     return esp_wifi_connect() == ESP_OK ? 0 : -1;
 }
 
@@ -328,6 +376,14 @@ int wlh_wifi_backend_start_ap(
     if (esp_wifi_set_config(WIFI_IF_AP, &config) != ESP_OK)
         return -1;
     backend.ap_active = true;
+    ESP_LOGI(
+        TAG,
+        "AP started: ssid=%.*s channel=%u max_clients=%u",
+        (int)request->ssid_size,
+        (const char *)request->ssid,
+        (unsigned)config.ap.channel,
+        (unsigned)config.ap.max_connection
+    );
     return 0;
 }
 
@@ -340,6 +396,7 @@ int wlh_wifi_backend_stop_ap(void *context) {
     if (esp_wifi_set_mode(WIFI_MODE_STA) != ESP_OK)
         return -1;
     backend.ap_active = false;
+    ESP_LOGI(TAG, "AP stopped");
     return 0;
 }
 

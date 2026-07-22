@@ -30,3 +30,7 @@ target_link_libraries(${COMPONENT_LIB} PUBLIC wlh_coproc_core)
 # FreeRTOS OSAL from Common.
 wlh_common_enable_freertos_osal()
 target_link_libraries(${COMPONENT_LIB} PUBLIC wlh::freertos_osal)
+
+# ESP-IDF log backend for the core logging abstraction.
+wlh_common_enable_log(BACKEND ESP)
+target_link_libraries(${COMPONENT_LIB} PUBLIC wlh::log)

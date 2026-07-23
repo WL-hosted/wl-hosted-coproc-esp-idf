@@ -35,6 +35,7 @@ typedef struct wifi_backend {
     wlh_coproc_t *coproc;
     uint32_t initialize_operation_id;
     uint32_t scan_id;
+    uint32_t interface_flags;
     bool driver_started;
     bool connected;
     bool disconnect_locally;
@@ -277,7 +278,6 @@ int wlh_wifi_backend_init(wlh_coproc_t *coproc) {
     backend.coproc = coproc;
     if (esp_wifi_init(&config) != ESP_OK ||
         esp_wifi_set_storage(WIFI_STORAGE_RAM) != ESP_OK ||
-        esp_wifi_set_mode(WIFI_MODE_APSTA) != ESP_OK ||
         esp_event_handler_register(
             WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL
         ) != ESP_OK) {
@@ -287,7 +287,10 @@ int wlh_wifi_backend_init(wlh_coproc_t *coproc) {
     return 0;
 }
 
-int wlh_wifi_backend_initialize(void *context, uint32_t operation_id) {
+int wlh_wifi_backend_initialize(
+    void *context, uint32_t operation_id, uint32_t interface_flags
+) {
+    wifi_mode_t mode;
     (void)context;
     if (backend.driver_started) {
         /* Already up: report completion inline. */
@@ -296,11 +299,27 @@ int wlh_wifi_backend_initialize(void *context, uint32_t operation_id) {
                    ? 0
                    : -1;
     }
+    if (interface_flags == 0u || interface_flags > 3u)
+        return -1;
+    mode = (interface_flags & 3u) == 1u   ? WIFI_MODE_STA
+           : (interface_flags & 3u) == 2u ? WIFI_MODE_AP
+                                          : WIFI_MODE_APSTA;
+    if (esp_wifi_set_mode(mode) != ESP_OK)
+        return -1;
+    backend.interface_flags = interface_flags;
     if (esp_wifi_start() != ESP_OK)
         return -1;
     backend.initialize_operation_id = operation_id;
     backend.driver_started = true;
     (void)esp_wifi_internal_reg_rxcb(WIFI_IF_STA, sta_rx_callback);
+    ESP_LOGI(
+        TAG,
+        "Wi-Fi started mode=%s flags=%lu",
+        mode == WIFI_MODE_STA    ? "STA"
+        : mode == WIFI_MODE_AP   ? "AP"
+                                 : "APSTA",
+        (unsigned long)interface_flags
+    );
     return 0;
 }
 
@@ -418,10 +437,16 @@ int wlh_wifi_backend_start_ap(
                                              : request->max_clients);
     config.ap.pmf_cfg.capable = true;
     config.ap.pmf_cfg.required = false;
-    /* esp_wifi_set_config requires the AP interface to be enabled; restore
-     * the mode first if a previous stop_ap tore it down. */
-    if (!backend.ap_active && esp_wifi_set_mode(WIFI_MODE_APSTA) != ESP_OK) {
-        return -1;
+    /* esp_wifi_set_config requires the AP interface to be enabled; enable it
+     * when the initial request did not include AP. */
+    if (!backend.ap_active) {
+        wifi_mode_t current_mode;
+        if (esp_wifi_get_mode(&current_mode) != ESP_OK)
+            return -1;
+        if (current_mode != WIFI_MODE_AP && current_mode != WIFI_MODE_APSTA) {
+            if (esp_wifi_set_mode(WIFI_MODE_APSTA) != ESP_OK)
+                return -1;
+        }
     }
     if (esp_wifi_set_config(WIFI_IF_AP, &config) != ESP_OK)
         return -1;
@@ -441,11 +466,14 @@ int wlh_wifi_backend_stop_ap(void *context) {
     (void)context;
     if (!backend.ap_active)
         return -1;
-    /* Drop to STA-only mode: tears down the AP interface and disconnects
-     * its clients while keeping the STA alive. */
-    if (esp_wifi_set_mode(WIFI_MODE_STA) != ESP_OK)
-        return -1;
     backend.ap_active = false;
+    /* If AP was not requested during initialize, return to STA-only mode to
+     * avoid keeping the SoftAP interface active. Otherwise leave the requested
+     * interface resources in place. */
+    if ((backend.interface_flags & 2u) == 0u) {
+        if (esp_wifi_set_mode(WIFI_MODE_STA) != ESP_OK)
+            return -1;
+    }
     ESP_LOGI(TAG, "AP stopped");
     return 0;
 }

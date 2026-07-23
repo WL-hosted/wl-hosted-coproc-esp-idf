@@ -19,7 +19,9 @@ extern "C" {
 int wlh_wifi_backend_init(wlh_coproc_t *coproc);
 
 /* wlh_wifi_*_fn implementations for wlh_coproc_config_t.wifi. */
-int wlh_wifi_backend_initialize(void *context, uint32_t operation_id);
+int wlh_wifi_backend_initialize(
+    void *context, uint32_t operation_id, uint32_t interface_flags
+);
 int wlh_wifi_backend_scan(void *context, uint32_t scan_id);
 int wlh_wifi_backend_connect(
     void *context, const wlh_coproc_wifi_connect_t *request

@@ -315,9 +315,9 @@ int wlh_wifi_backend_initialize(
     ESP_LOGI(
         TAG,
         "Wi-Fi started mode=%s flags=%lu",
-        mode == WIFI_MODE_STA    ? "STA"
-        : mode == WIFI_MODE_AP   ? "AP"
-                                 : "APSTA",
+        mode == WIFI_MODE_STA  ? "STA"
+        : mode == WIFI_MODE_AP ? "AP"
+                               : "APSTA",
         (unsigned long)interface_flags
     );
     return 0;

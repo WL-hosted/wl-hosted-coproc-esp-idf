@@ -1,6 +1,6 @@
 # WL-hosted Coprocessor ESP-IDF Adapter
 
-`wl-hosted-coproc-esp-idf` 是 WL-hosted 的 ESP32-S3 协处理器固件。它将 `core/coproc-core` 适配到 ESP-IDF：使用 FreeRTOS OSAL、CherryUSB 设备 bulk 传输，以及 `esp_wifi` STA/SoftAP 后端。固件配置文件（profile）为 `espressif.esp32s3.coreboard.usb-wifi`。
+`wl-hosted-coproc-esp-idf` 是 WL-hosted 的 ESP32-S3 协处理器固件。它将 `core/coproc-core` 适配到 ESP-IDF：使用 FreeRTOS OSAL、CherryUSB 设备 bulk 传输，以及 `esp_wifi` STA/AP/SoftAP 后端。固件配置文件（profile）为 `espressif.esp32s3.coreboard.usb-wifi`。
 
 ```text
 Host（POSIX host-sim over USB bulk）
@@ -8,7 +8,7 @@ Host（POSIX host-sim over USB bulk）
 ESP32-S3（本固件）
   ├─ CherryUSB device，vendor 接口，bulk OUT 0x01 / bulk IN 0x81
   ├─ core/coproc-core（link/session/credit/RPC，FreeRTOS OSAL）
-  └─ esp_wifi STA/SoftAP 后端 + Device Information + User Passthrough
+  └─ esp_wifi STA/AP/SoftAP 后端 + Device Information + User Passthrough
 ```
 
 ## 1. 仓库定位
@@ -98,7 +98,7 @@ idf.py fullclean
 | `core/common/osal/src/freertos_osal.c` | FreeRTOS OSAL 适配，实现全部 `wlh_osal` 操作。 |
 | `core/common/osal/include/wlh/freertos_osal.h` | FreeRTOS OSAL 公共头文件。 |
 | `main/transport_usb.c/h` | CherryUSB 设备 bulk 传输实现，包括帧重组、TX 提交与总线复位处理。 |
-| `main/wifi_backend.c/h` | `esp_wifi` STA/SoftAP 后端，包括初始化、扫描、连接、断开、start_ap/stop_ap、AP client 事件上报与 Ethernet TX 路径。 |
+| `main/wifi_backend.c/h` | `esp_wifi` STA/AP/SoftAP 后端，包括初始化、扫描、连接、断开、start_ap/stop_ap、AP client 事件上报与 Ethernet TX 路径。 |
 | `main/device_info.c/h` | Device Information 服务提供者。 |
 | `main/user_passthrough.c/h` | User Passthrough 服务实现（RPC SEND + 可选 RESULT 事件回显）。 |
 | `main/CMakeLists.txt` | ESP-IDF component 注册与 Coproc Core 子目录引入。 |

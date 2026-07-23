@@ -137,7 +137,7 @@ static void report_scan_done(void) {
     (void)wlh_coproc_wifi_scan_completed(
         backend.coproc, backend.scan_id, ap_count, false
     );
-    ESP_LOGI(TAG, "scan results reported (%u sent)", (unsigned)ap_count);
+    ESP_LOGI(TAG, "event complete: SCAN_DONE results=%u", (unsigned)ap_count);
     free(records);
 }
 
@@ -148,15 +148,24 @@ static void wifi_event_handler(
     (void)base;
     switch (id) {
     case WIFI_EVENT_STA_START:
-        ESP_LOGI(TAG, "STA started");
+        ESP_LOGI(TAG, "event received: STA_START");
         if (backend.initialize_operation_id != 0u) {
             uint32_t operation_id = backend.initialize_operation_id;
+            wlh_coproc_result_t result;
             backend.initialize_operation_id = 0u;
-            (void)wlh_coproc_wifi_initialized(backend.coproc, operation_id, 0);
+            result =
+                wlh_coproc_wifi_initialized(backend.coproc, operation_id, 0);
+            ESP_LOGI(
+                TAG,
+                "event complete: STA_START initialize=%lu report=%d",
+                (unsigned long)operation_id,
+                (int)result
+            );
         }
         break;
 
     case WIFI_EVENT_SCAN_DONE:
+        ESP_LOGI(TAG, "event received: SCAN_DONE");
         report_scan_done();
         break;
 
@@ -164,11 +173,16 @@ static void wifi_event_handler(
         wifi_event_sta_connected_t *event = data;
         wifi_ap_record_t ap_info;
         wlh_coproc_bss_t bss;
+        wlh_coproc_result_t result;
         memset(&bss, 0, sizeof(bss));
         backend.connected = true;
         bss.ssid = event->ssid;
         bss.ssid_size = event->ssid_len;
         memcpy(bss.bssid, event->bssid, sizeof(bss.bssid));
+        if (esp_wifi_get_mac(WIFI_IF_STA, bss.interface_mac) != ESP_OK) {
+            ESP_LOGE(TAG, "failed to read STA MAC after connection");
+            memset(bss.interface_mac, 0, sizeof(bss.interface_mac));
+        }
         bss.channel = event->channel;
         if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
             bss.rssi_dbm = ap_info.rssi;
@@ -176,26 +190,36 @@ static void wifi_event_handler(
         }
         ESP_LOGI(
             TAG,
-            "connected: ssid=%.*s channel=%u",
+            "event received: STA_CONNECTED ssid=%.*s channel=%u",
             (int)event->ssid_len,
             (const char *)event->ssid,
             (unsigned)event->channel
         );
-        (void)wlh_coproc_wifi_connected(backend.coproc, &bss);
+        result = wlh_coproc_wifi_connected(backend.coproc, &bss);
+        ESP_LOGI(TAG, "event complete: STA_CONNECTED report=%d", (int)result);
         break;
     }
 
     case WIFI_EVENT_STA_DISCONNECTED: {
         wifi_event_sta_disconnected_t *event = data;
         bool locally_initiated = backend.disconnect_locally;
+        wlh_coproc_result_t result;
         backend.disconnect_locally = false;
         backend.connected = false;
-        ESP_LOGI(TAG, "disconnected (reason=%u)", event->reason);
-        (void)wlh_coproc_wifi_disconnected(
+        ESP_LOGI(
+            TAG,
+            "event received: STA_DISCONNECTED reason=%u local=%u",
+            (unsigned)event->reason,
+            locally_initiated ? 1u : 0u
+        );
+        result = wlh_coproc_wifi_disconnected(
             backend.coproc,
             locally_initiated ? DISCONNECT_REASON_LOCAL_REQUEST
                               : map_disconnect_reason(event->reason),
             locally_initiated
+        );
+        ESP_LOGI(
+            TAG, "event complete: STA_DISCONNECTED report=%d", (int)result
         );
         break;
     }
@@ -297,6 +321,7 @@ int wlh_wifi_backend_connect(
     void *context, const wlh_coproc_wifi_connect_t *request
 ) {
     wifi_config_t config;
+    esp_err_t result;
     (void)context;
     if (!backend.driver_started || request == NULL ||
         request->ssid_size == 0u || request->ssid_size > 32u ||
@@ -311,29 +336,54 @@ int wlh_wifi_backend_connect(
     } else if (request->security == WIFI_SECURITY_WPA3_SAE) {
         config.sta.threshold.authmode = WIFI_AUTH_WPA3_PSK;
         config.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
+    } else if (request->security == WIFI_SECURITY_WPA2_WPA3_PSK) {
+        config.sta.threshold.authmode = WIFI_AUTH_WPA2_WPA3_PSK;
+        config.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
     } else {
         config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
     }
     config.sta.pmf_cfg.capable = true;
     config.sta.pmf_cfg.required = false;
-    if (esp_wifi_set_config(WIFI_IF_STA, &config) != ESP_OK)
-        return -1;
-    backend.disconnect_locally = false;
     ESP_LOGI(
         TAG,
-        "connect requested: ssid=%.*s",
+        "request received: CONNECT ssid=%.*s security=%lu",
         (int)request->ssid_size,
-        (const char *)request->ssid
+        (const char *)request->ssid,
+        (unsigned long)request->security
     );
-    return esp_wifi_connect() == ESP_OK ? 0 : -1;
+    result = esp_wifi_set_config(WIFI_IF_STA, &config);
+    if (result != ESP_OK) {
+        ESP_LOGE(
+            TAG,
+            "request complete: CONNECT set_config failed: %s",
+            esp_err_to_name(result)
+        );
+        return -1;
+    }
+    backend.disconnect_locally = false;
+    result = esp_wifi_connect();
+    ESP_LOGI(
+        TAG,
+        "request complete: CONNECT submitted result=%s",
+        esp_err_to_name(result)
+    );
+    return result == ESP_OK ? 0 : -1;
 }
 
 int wlh_wifi_backend_disconnect(void *context) {
+    esp_err_t result;
     (void)context;
     if (!backend.driver_started)
         return -1;
+    ESP_LOGI(TAG, "request received: DISCONNECT");
     backend.disconnect_locally = true;
-    return esp_wifi_disconnect() == ESP_OK ? 0 : -1;
+    result = esp_wifi_disconnect();
+    ESP_LOGI(
+        TAG,
+        "request complete: DISCONNECT submitted result=%s",
+        esp_err_to_name(result)
+    );
+    return result == ESP_OK ? 0 : -1;
 }
 
 int wlh_wifi_backend_start_ap(

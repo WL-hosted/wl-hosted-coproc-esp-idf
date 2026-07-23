@@ -23,7 +23,11 @@
 #define WLH_USB_EP_MPS 64u
 
 #define WLH_USB_BUS_ID 0u
-#define WLH_USB_OUT_CHUNK 512u
+/* Arm one maximum-size packet at a time. If a larger buffer is armed,
+ * CherryUSB waits for a short packet before completing the read; a wire
+ * frame whose size is exactly a multiple of 64 bytes would then remain
+ * buffered indefinitely. rx_feed() already reassembles the byte stream. */
+#define WLH_USB_OUT_CHUNK WLH_USB_EP_MPS
 #define WLH_USB_RX_RING_SIZE (2u * 4096u + 512u)
 #define WLH_USB_TX_QUEUE_DEPTH 8u
 #define WLH_USB_TX_TIMEOUT_MS 2000u
@@ -213,9 +217,17 @@ static void rx_feed(const uint8_t *data, size_t size) {
         }
         if (transport.rx_frame_length < frame_size)
             break;
-        (void)wlh_coproc_on_frame(
+        wlh_coproc_result_t result = wlh_coproc_on_frame(
             transport.coproc, transport.rx_frame, frame_size
         );
+        if (result != WLH_COPROC_OK) {
+            ESP_LOGW(
+                TAG,
+                "RX frame rejected: bytes=%u result=%d",
+                (unsigned)frame_size,
+                (int)result
+            );
+        }
         rx_consume(frame_size);
     }
 }
@@ -328,13 +340,6 @@ static void tx_task_main(void *argument) {
         /* Drop stale IN completions from transfers that already timed out,
          * so the wait below only observes the current transfer. */
         (void)xSemaphoreTake(transport.tx_done, 0);
-        TickType_t started = xTaskGetTickCount();
-        ESP_LOGI(
-            TAG,
-            "tx begin: %u bytes (queue=%u)",
-            (unsigned)job.size,
-            (unsigned)uxQueueMessagesWaiting(transport.tx_queue)
-        );
         if (usbd_ep_start_write(
                 WLH_USB_BUS_ID, WLH_USB_EP_IN, job.frame, job.size
             ) != 0) {
@@ -349,14 +354,6 @@ static void tx_task_main(void *argument) {
                 TAG, "bulk IN transfer timed out (%u bytes)", (unsigned)job.size
             );
             status = -1;
-        } else {
-            ESP_LOGI(
-                TAG,
-                "tx done: %u bytes in %lu ms",
-                (unsigned)job.size,
-                (unsigned long)((xTaskGetTickCount() - started) *
-                                portTICK_PERIOD_MS)
-            );
         }
         job.completion(job.completion_context, job.frame, job.size, status);
         if (status != 0 && !atomic_exchange(&transport.restart_pending, true)) {

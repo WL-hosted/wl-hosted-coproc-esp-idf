@@ -8,10 +8,11 @@ extern "C" {
 #endif
 
 /*
- * esp_wifi STA+SoftAP backend for the Coprocessor Core. The wifi ops are
- * nonblocking submissions; scan/connect/initialize results and SoftAP client
- * join/leave events reach the Core through the wlh_coproc_wifi_* ingress APIs
- * from the Wi-Fi event handler.
+ * esp_wifi backend for the Coprocessor Core. The interface mode (STA/AP/APSTA)
+ * is selected from the host's WifiInitializeRequest.interface_flags. The wifi
+ * ops are nonblocking submissions; scan/connect/initialize results and SoftAP
+ * client join/leave events reach the Core through the wlh_coproc_wifi_*
+ * ingress APIs from the Wi-Fi event handler.
  */
 
 /* Registers the Wi-Fi event handler and the STA receive callback. The

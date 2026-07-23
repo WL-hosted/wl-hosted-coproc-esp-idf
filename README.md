@@ -141,7 +141,8 @@ USB 总线复位或重新枚举时，固件会：
 当前已实现：
 
 - **Wi-Fi**：initialize、scan、connect、disconnect、start_ap、stop_ap，以及 Ethernet TX/RX（STA 接口）。
-  - 固件以 `WIFI_MODE_APSTA` 运行，STA 与 SoftAP 并存。SoftAP 支持 WPA2/WPA3/开放网络（空密码即开放），`max_clients` 上限 10。
+  - Wi-Fi 模式由 Host 在 `initialize` 时通过 `interface_flags`（bit0=STA，bit1=AP）决定，可配置为 STA-only、AP-only 或 STA+SoftAP 并存。当前 host 默认请求 STA-only。
+  - SoftAP 支持 WPA2/WPA3/开放网络（空密码即开放），`max_clients` 上限 10。
   - 注意：ESP32 在 APSTA 模式下，一旦 STA 关联成功，SoftAP 信道会跟随 STA 信道；显式配置的 AP 信道可能被覆盖。
   - AP client 加入/离开通过 `WifiApClientJoinedEvent`（`0x8005`）/ `WifiApClientLeftEvent`（`0x8006`）上报。
 - **Device Information**：返回厂商、MCU 型号、板级 profile、UID 等信息。

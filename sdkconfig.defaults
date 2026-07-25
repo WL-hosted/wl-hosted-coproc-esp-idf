@@ -1,7 +1,3 @@
-# WL-hosted ESP32-S3 Coprocessor defaults.
+# WL-hosted Coprocessor defaults shared by all ESP-IDF targets.
 # 1 ms OSAL monotonic resolution and heartbeat accuracy.
 CONFIG_FREERTOS_HZ=1000
-# CherryUSB device stack (DWC2 port is hardcoded by the component for ESP).
-CONFIG_CHERRYUSB=y
-CONFIG_CHERRYUSB_DEVICE=y
-# Keep the USB-Serial/JTAG console; CherryUSB owns the USB OTG peripheral.

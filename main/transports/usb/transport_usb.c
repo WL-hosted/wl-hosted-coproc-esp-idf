@@ -1,4 +1,4 @@
-#include "transport_usb.h"
+#include "transport.h"
 
 #include <stdatomic.h>
 #include <string.h>
@@ -52,8 +52,8 @@ typedef struct tx_job {
 typedef struct usb_transport {
     wlh_coproc_t *coproc;
     size_t max_frame_size;
-    wlh_usb_bus_reset_fn on_bus_reset;
-    void *bus_reset_context;
+    wlh_transport_reset_fn on_reset;
+    void *reset_context;
 
     QueueHandle_t tx_queue;
     SemaphoreHandle_t tx_done;
@@ -249,7 +249,7 @@ static void rx_task_main(void *argument) {
 /* TX: core submit -> queue -> task -> bulk IN                         */
 /* ------------------------------------------------------------------ */
 
-int wlh_usb_transport_submit_tx(
+int wlh_transport_submit_tx(
     void *context,
     uint8_t *frame,
     size_t size,
@@ -323,6 +323,8 @@ static void tx_task_main(void *argument) {
             /* Bus reset/re-enumeration: queued frames belong to the dead
              * session; complete them as failed in task context. */
             flush_tx_queue(-1);
+            if (transport.on_reset != NULL)
+                transport.on_reset(transport.reset_context);
             continue;
         }
         if (xQueueReceive(transport.tx_queue, &job, 0) != pdTRUE)
@@ -376,11 +378,6 @@ static void usb_event_handler(uint8_t busid, uint8_t event) {
     case USBD_EVENT_RESET:
         xEventGroupClearBitsFromISR(transport.events, WLH_USB_CONFIGURED_BIT);
         xEventGroupSetBitsFromISR(transport.events, WLH_USB_RESET_BIT, &woken);
-        if (transport.on_bus_reset != NULL) {
-            /* Runs in ISR context: the hook must only notify a task-safe
-             * mechanism (event/queue FromISR), never the Core directly. */
-            transport.on_bus_reset(transport.bus_reset_context);
-        }
         break;
     case USBD_EVENT_CONFIGURED:
         atomic_store(&transport.restart_pending, false);
@@ -413,7 +410,7 @@ static void fill_serial_string(void) {
     serial_string[12] = '\0';
 }
 
-int wlh_usb_transport_start(const wlh_usb_transport_config_t *config) {
+int wlh_transport_start(const wlh_transport_config_t *config) {
     if (config == NULL || config->coproc == NULL ||
         config->max_frame_size > 4096u)
         return -1;
@@ -421,8 +418,8 @@ int wlh_usb_transport_start(const wlh_usb_transport_config_t *config) {
     memset(&transport, 0, sizeof(transport));
     transport.coproc = config->coproc;
     transport.max_frame_size = config->max_frame_size;
-    transport.on_bus_reset = config->on_bus_reset;
-    transport.bus_reset_context = config->bus_reset_context;
+    transport.on_reset = config->on_reset;
+    transport.reset_context = config->reset_context;
 
     transport.tx_queue = xQueueCreate(WLH_USB_TX_QUEUE_DEPTH, sizeof(tx_job_t));
     transport.tx_done = xSemaphoreCreateBinary();
@@ -460,4 +457,8 @@ int wlh_usb_transport_start(const wlh_usb_transport_config_t *config) {
         TAG, "usb device started (vid=%04x pid=%04x)", WLH_USB_VID, WLH_USB_PID
     );
     return 0;
+}
+
+size_t wlh_transport_max_frame_size(void) {
+    return 4096u;
 }

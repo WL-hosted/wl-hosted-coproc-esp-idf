@@ -1,0 +1,66 @@
+menu "WL-hosted Coprocessor Configuration"
+
+    choice WLH_TRANSPORT
+        prompt "Host transport"
+        default WLH_TRANSPORT_USB if IDF_TARGET_ESP32S3
+        default WLH_TRANSPORT_SDIO if IDF_TARGET_ESP32C6
+
+        config WLH_TRANSPORT_USB
+            bool "USB bulk"
+            depends on IDF_TARGET_ESP32S3 && SOC_USB_OTG_SUPPORTED
+
+        config WLH_TRANSPORT_SDIO
+            bool "SDIO slave"
+            depends on IDF_TARGET_ESP32C6 && SOC_SDIO_SLAVE_SUPPORTED
+    endchoice
+
+    menu "SDIO transport"
+        depends on WLH_TRANSPORT_SDIO
+
+        choice WLH_SDIO_BUS_SPEED
+            prompt "SDIO bus speed capability"
+            default WLH_SDIO_HIGH_SPEED
+
+            config WLH_SDIO_DEFAULT_SPEED
+                bool "Default speed (up to 20 MHz)"
+
+            config WLH_SDIO_HIGH_SPEED
+                bool "High speed (up to 40 MHz)"
+        endchoice
+
+        choice WLH_SDIO_TIMING
+            prompt "SDIO slave timing"
+            default WLH_SDIO_TIMING_PSEND_PSAMPLE
+
+            config WLH_SDIO_TIMING_PSEND_PSAMPLE
+                bool "Send positive edge, sample positive edge"
+
+            config WLH_SDIO_TIMING_NSEND_PSAMPLE
+                bool "Send negative edge, sample positive edge"
+
+            config WLH_SDIO_TIMING_PSEND_NSAMPLE
+                bool "Send positive edge, sample negative edge"
+
+            config WLH_SDIO_TIMING_NSEND_NSAMPLE
+                bool "Send negative edge, sample negative edge"
+        endchoice
+
+        config WLH_SDIO_TX_QUEUE_DEPTH
+            int "SDIO TX queue depth"
+            range 2 32
+            default 8
+
+        config WLH_SDIO_RX_BUFFER_COUNT
+            int "SDIO RX DMA buffer count"
+            range 2 16
+            default 8
+
+        config WLH_SDIO_INTERNAL_PULLUP
+            bool "Enable internal SDIO pull-ups (debug only)"
+            default n
+            help
+                Internal pull-ups are insufficient for reliable operation.
+                External pull-ups are required on CMD and DAT0-DAT3.
+    endmenu
+
+endmenu

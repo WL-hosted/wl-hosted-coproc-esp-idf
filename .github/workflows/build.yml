@@ -1,0 +1,67 @@
+name: Build firmware
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.target }} / ${{ matrix.transport }}
+    runs-on: ubuntu-latest
+    container: espressif/idf:v5.5.2
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: esp32s3
+            transport: usb
+          - target: esp32c6
+            transport: sdio
+
+    steps:
+      - name: Check out repository and submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Verify submodules
+        run: git submodule status --recursive
+
+      - name: Configure and build
+        env:
+          IDF_TARGET: ${{ matrix.target }}
+        run: |
+          idf.py \
+            -B "build-${IDF_TARGET}" \
+            -D "IDF_TARGET=${IDF_TARGET}" \
+            -D "SDKCONFIG=/tmp/wlh-sdkconfig-${IDF_TARGET}" \
+            reconfigure build
+
+      - name: Verify dependency locks
+        run: git diff --exit-code -- dependencies.lock.esp32s3 dependencies.lock.esp32c6
+
+      - name: Collect firmware
+        env:
+          IDF_TARGET: ${{ matrix.target }}
+        run: |
+          mkdir -p "artifacts/${IDF_TARGET}"
+          cp "build-${IDF_TARGET}/bootloader/bootloader.bin" "artifacts/${IDF_TARGET}/"
+          cp "build-${IDF_TARGET}/partition_table/partition-table.bin" "artifacts/${IDF_TARGET}/"
+          cp "build-${IDF_TARGET}/wlh_coproc_esp_idf.bin" "artifacts/${IDF_TARGET}/"
+          cp "build-${IDF_TARGET}/wlh_coproc_esp_idf.elf" "artifacts/${IDF_TARGET}/"
+          cp "build-${IDF_TARGET}/wlh_coproc_esp_idf.map" "artifacts/${IDF_TARGET}/"
+          cp "build-${IDF_TARGET}/flasher_args.json" "artifacts/${IDF_TARGET}/"
+          cp "/tmp/wlh-sdkconfig-${IDF_TARGET}" "artifacts/${IDF_TARGET}/sdkconfig"
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: wlh-coproc-${{ matrix.target }}-${{ matrix.transport }}
+          path: artifacts/${{ matrix.target }}
+          if-no-files-found: error

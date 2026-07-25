@@ -1,3 +1,6 @@
 dependencies:
   idf: ">=5.0"
-  cherry-embedded/cherryusb: "1.6.1"
+  cherry-embedded/cherryusb:
+    version: "1.6.1"
+    rules:
+      - if: "target in [esp32s3]"

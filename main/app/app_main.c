@@ -10,13 +10,16 @@
 #include "nvs_flash.h"
 
 #include "device_info.h"
-#include "transport_usb.h"
+#include "firmware_config.h"
+#include "transport.h"
 #include "user_passthrough.h"
 #include "wifi_backend.h"
 #include "wlh/coproc.h"
 #include "wlh/freertos_osal.h"
 
-#define LINK_EVENT_USB_RESET (1u << 0)
+#pragma message("WLH PROFILE: " WLH_BOARD_PROFILE)
+
+#define LINK_EVENT_TRANSPORT_RESET (1u << 0)
 
 static const char *TAG = "wlh-coproc";
 
@@ -33,25 +36,27 @@ static void buffer_free(void *context, uint8_t *buffer) {
     free(buffer);
 }
 
-/* Called in ISR context by the USB transport on bus reset. */
-static void on_usb_bus_reset(void *context) {
-    BaseType_t woken = pdFALSE;
+/* Called in task context after the active transport has reset. */
+static void on_transport_reset(void *context) {
     (void)context;
-    xEventGroupSetBitsFromISR(link_events, LINK_EVENT_USB_RESET, &woken);
-    portYIELD_FROM_ISR(woken);
+    xEventGroupSetBits(link_events, LINK_EVENT_TRANSPORT_RESET);
 }
 
-/* Restarts the Core after a USB bus reset/re-enumeration so the link
- * renegotiates Hello with a fresh session (USB binding requirement). */
+/* Restarts the Core after a transport reset so the link renegotiates Hello
+ * with a fresh session. */
 static void link_control_task(void *argument) {
     (void)argument;
     for (;;) {
         xEventGroupWaitBits(
-            link_events, LINK_EVENT_USB_RESET, pdTRUE, pdFALSE, portMAX_DELAY
+            link_events,
+            LINK_EVENT_TRANSPORT_RESET,
+            pdTRUE,
+            pdFALSE,
+            portMAX_DELAY
         );
         /* Let the re-enumeration settle before re-accepting frames. */
         vTaskDelay(pdMS_TO_TICKS(100u));
-        ESP_LOGW(TAG, "usb bus reset: restarting link core");
+        ESP_LOGW(TAG, "transport reset: restarting link core");
         if (wlh_coproc_stop(&coproc) != WLH_COPROC_OK)
             ESP_LOGW(TAG, "core stop failed during restart");
         if (wlh_coproc_start(&coproc) != WLH_COPROC_OK)
@@ -61,12 +66,14 @@ static void link_control_task(void *argument) {
 
 void app_main(void) {
     wlh_coproc_config_t config;
-    wlh_usb_transport_config_t usb_config;
+    wlh_transport_config_t transport_config;
 
     ESP_LOGI(
         TAG,
-        "wl-hosted esp32-s3 coprocessor (profile %s)",
-        "espressif.esp32s3.coreboard.usb-wifi"
+        "wl-hosted %s coprocessor (transport %s, profile %s)",
+        WLH_MCU_NAME,
+        WLH_TRANSPORT_NAME,
+        WLH_BOARD_PROFILE
     );
 
     (void)nvs_flash_init();
@@ -80,7 +87,7 @@ void app_main(void) {
 
     memset(&config, 0, sizeof(config));
     config.port.context = NULL;
-    config.port.submit_tx = wlh_usb_transport_submit_tx;
+    config.port.submit_tx = wlh_transport_submit_tx;
     config.port.ethernet_rx = wlh_wifi_backend_ethernet_tx;
     config.buffers = (wlh_coproc_buffer_ops_t){NULL, buffer_alloc, buffer_free};
     config.osal = wlh_freertos_osal_ops(&freertos_osal);
@@ -93,7 +100,7 @@ void app_main(void) {
                                           wlh_wifi_backend_stop_ap};
     config.device_info = wlh_device_info_ops();
     config.user_passthrough = wlh_user_passthrough_ops(&coproc);
-    config.max_frame_size = 4096u;
+    config.max_frame_size = wlh_transport_max_frame_size();
     config.heartbeat_interval_ms = 1000u;
     config.initial_credit = 64u;
     config.core_queue_depth = 16u;
@@ -109,18 +116,18 @@ void app_main(void) {
         abort();
     }
 
-    memset(&usb_config, 0, sizeof(usb_config));
-    usb_config.coproc = &coproc;
-    usb_config.max_frame_size = config.max_frame_size;
-    usb_config.on_bus_reset = on_usb_bus_reset;
-    usb_config.bus_reset_context = NULL;
+    memset(&transport_config, 0, sizeof(transport_config));
+    transport_config.coproc = &coproc;
+    transport_config.max_frame_size = config.max_frame_size;
+    transport_config.on_reset = on_transport_reset;
+    transport_config.reset_context = NULL;
 
     if (wlh_coproc_start(&coproc) != WLH_COPROC_OK) {
         ESP_LOGE(TAG, "coproc start failed");
         abort();
     }
-    if (wlh_usb_transport_start(&usb_config) != 0) {
-        ESP_LOGE(TAG, "usb transport start failed");
+    if (wlh_transport_start(&transport_config) != 0) {
+        ESP_LOGE(TAG, "%s transport start failed", WLH_TRANSPORT_NAME);
         abort();
     }
     if (xTaskCreate(link_control_task, "wlh-link-ctrl", 4096u, NULL, 7, NULL) !=

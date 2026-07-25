@@ -15,7 +15,7 @@ extern "C" {
  * ingress APIs from the Wi-Fi event handler.
  */
 
-/* Registers the Wi-Fi event handler and the STA receive callback. The
+/* Registers the Wi-Fi event handler and receive callbacks. The
  * default event loop must already exist. */
 int wlh_wifi_backend_init(wlh_coproc_t *coproc);
 
@@ -37,6 +37,9 @@ int wlh_wifi_backend_stop_ap(void *context);
  * Core task and returns immediately; frames are dropped when not
  * connected. */
 void wlh_wifi_backend_ethernet_tx(
+    void *context, const uint8_t *frame, size_t size
+);
+void wlh_wifi_backend_ethernet_ap_tx(
     void *context, const uint8_t *frame, size_t size
 );
 

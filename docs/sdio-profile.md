@@ -22,9 +22,10 @@ standard WL-hosted header and payload checksums remain authoritative. A
 transaction is rejected when its length is less than the wire header, exceeds
 4092 bytes, or differs from the length encoded by the frame.
 
-The firmware uses bounded TX queues and pre-registered DMA RX buffers. TX
-ownership returns to Coprocessor Core only after the host consumes the SDIO
-packet.
+The firmware uses a bounded software TX queue, one hardware packet in flight,
+and pre-registered DMA RX buffers. The single in-flight rule keeps each
+packet-length delta aligned with exactly one wire frame. TX ownership returns
+to Coprocessor Core only after the host consumes the SDIO packet.
 
 ## ESP32-C6 pins
 

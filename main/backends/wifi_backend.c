@@ -97,6 +97,16 @@ static esp_err_t sta_rx_callback(void *buffer, uint16_t length, void *eb) {
     return ESP_OK;
 }
 
+static esp_err_t ap_rx_callback(void *buffer, uint16_t length, void *eb) {
+    (void)eb;
+    if (backend.coproc != NULL) {
+        (void)wlh_coproc_ethernet_ap_send(
+            backend.coproc, buffer, (size_t)length
+        );
+    }
+    return ESP_OK;
+}
+
 static void report_scan_done(void) {
     uint16_t ap_count = 0u;
     wifi_ap_record_t *records;
@@ -450,7 +460,26 @@ int wlh_wifi_backend_start_ap(
     }
     if (esp_wifi_set_config(WIFI_IF_AP, &config) != ESP_OK)
         return -1;
+    if (esp_wifi_internal_reg_rxcb(WIFI_IF_AP, ap_rx_callback) != ESP_OK)
+        return -1;
     backend.ap_active = true;
+    {
+        wlh_coproc_bss_t ap;
+        wifi_config_t actual;
+        memset(&ap, 0, sizeof(ap));
+        memset(&actual, 0, sizeof(actual));
+        ap.ssid = request->ssid;
+        ap.ssid_size = request->ssid_size;
+        ap.security = request->security;
+        ap.channel = config.ap.channel == 0u ? 1u : config.ap.channel;
+        if (esp_wifi_get_config(WIFI_IF_AP, &actual) == ESP_OK)
+            ap.channel = actual.ap.channel;
+        if (esp_wifi_get_mac(WIFI_IF_AP, ap.interface_mac) != ESP_OK)
+            return -1;
+        memcpy(ap.bssid, ap.interface_mac, sizeof(ap.bssid));
+        if (wlh_coproc_wifi_ap_started(backend.coproc, &ap) != WLH_COPROC_OK)
+            return -1;
+    }
     ESP_LOGI(
         TAG,
         "AP started: ssid=%.*s channel=%u max_clients=%u",
@@ -474,8 +503,21 @@ int wlh_wifi_backend_stop_ap(void *context) {
         if (esp_wifi_set_mode(WIFI_MODE_STA) != ESP_OK)
             return -1;
     }
+    (void)esp_wifi_internal_reg_rxcb(WIFI_IF_AP, NULL);
+    (void)wlh_coproc_wifi_ap_stopped(
+        backend.coproc, DISCONNECT_REASON_LOCAL_REQUEST, true
+    );
     ESP_LOGI(TAG, "AP stopped");
     return 0;
+}
+
+void wlh_wifi_backend_ethernet_ap_tx(
+    void *context, const uint8_t *frame, size_t size
+) {
+    (void)context;
+    if (!backend.ap_active || frame == NULL || size == 0u || size > 1518u)
+        return;
+    (void)esp_wifi_internal_tx(WIFI_IF_AP, (void *)frame, (uint16_t)size);
 }
 
 void wlh_wifi_backend_ethernet_tx(

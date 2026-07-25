@@ -42,6 +42,7 @@ typedef struct sdio_transport {
     QueueHandle_t tx_queue;
     EventGroupHandle_t events;
     SemaphoreHandle_t state_lock;
+    SemaphoreHandle_t tx_window;
     TaskHandle_t tx_task;
     TaskHandle_t tx_done_task;
     TaskHandle_t rx_task;
@@ -131,8 +132,13 @@ static void tx_task_main(void *argument) {
 
         if (xQueueReceive(transport.tx_queue, &job, portMAX_DELAY) != pdTRUE)
             continue;
+        if (xSemaphoreTake(transport.tx_window, portMAX_DELAY) != pdTRUE) {
+            complete_job(&job, -1);
+            continue;
+        }
         if (atomic_load(&transport.resetting)) {
             complete_job(&job, -1);
+            xSemaphoreGive(transport.tx_window);
             continue;
         }
         dma_frame =
@@ -144,6 +150,7 @@ static void tx_task_main(void *argument) {
                 (unsigned)job.size
             );
             complete_job(&job, -1);
+            xSemaphoreGive(transport.tx_window);
             continue;
         }
         memcpy(dma_frame, job.frame, job.size);
@@ -154,6 +161,7 @@ static void tx_task_main(void *argument) {
             xSemaphoreGive(transport.state_lock);
             heap_caps_free(dma_frame);
             complete_job(&job, -1);
+            xSemaphoreGive(transport.tx_window);
             continue;
         }
         pending->in_use = true;
@@ -168,6 +176,7 @@ static void tx_task_main(void *argument) {
             heap_caps_free(dma_frame);
             ESP_LOGW(TAG, "SDIO TX queue failed: %s", esp_err_to_name(result));
             complete_job(&job, -1);
+            xSemaphoreGive(transport.tx_window);
             continue;
         }
         xSemaphoreGive(transport.state_lock);
@@ -198,6 +207,7 @@ static void tx_done_task_main(void *argument) {
         if (dma_frame != NULL) {
             heap_caps_free(dma_frame);
             complete_job(&job, 0);
+            xSemaphoreGive(transport.tx_window);
         }
     }
 }
@@ -284,6 +294,7 @@ static void reset_task_main(void *argument) {
             heap_caps_free(dma_frames[index]);
             complete_job(&jobs[index], -1);
         }
+        xSemaphoreGive(transport.tx_window);
         atomic_store(&transport.resetting, false);
         if (transport.on_reset != NULL)
             transport.on_reset(transport.reset_context);
@@ -342,11 +353,14 @@ int wlh_transport_start(const wlh_transport_config_t *config) {
         xQueueCreate(CONFIG_WLH_SDIO_TX_QUEUE_DEPTH, sizeof(tx_job_t));
     transport.events = xEventGroupCreate();
     transport.state_lock = xSemaphoreCreateMutex();
+    transport.tx_window = xSemaphoreCreateBinary();
     if (transport.tx_queue == NULL || transport.events == NULL ||
-        transport.state_lock == NULL || initialize_driver() != 0) {
+        transport.state_lock == NULL || transport.tx_window == NULL ||
+        initialize_driver() != 0) {
         ESP_LOGE(TAG, "SDIO transport initialization failed");
         return -1;
     }
+    xSemaphoreGive(transport.tx_window);
     if (xTaskCreate(
             tx_task_main, "wlh-sdio-tx", 4096u, NULL, 6, &transport.tx_task
         ) != pdPASS ||

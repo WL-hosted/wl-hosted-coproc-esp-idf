@@ -138,7 +138,7 @@ ESP-IDF/FreeRTOS/USB/SDIO 细节只存在于本 Adapter。
 当前实现：
 
 - Wi-Fi initialize、scan、connect、disconnect、start AP、stop AP；
-- STA Ethernet TX/RX；
+- STA/AP Ethernet TX/RX；
 - AP client join/leave event；
 - Device Information；
 - RPC 形式的 User Passthrough。

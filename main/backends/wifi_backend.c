@@ -85,25 +85,47 @@ static uint32_t map_disconnect_reason(uint8_t reason) {
     }
 }
 
+/* Temporary datapath diagnostics: throttle logs to the first few frames and
+   then every 100th to survive broadcast noise. */
+static uint32_t sta_rxcb_frames;
+static uint32_t sta_tx_frames;
+static uint32_t sta_tx_dropped;
+static uint32_t sta_tx_errors;
+
+static bool throttled_log(uint32_t count) {
+    return count <= 5u || count % 100u == 0u;
+}
+
 static esp_err_t sta_rx_callback(void *buffer, uint16_t length, void *eb) {
-    (void)eb;
     /* Runs on the Wi-Fi task. The Core copies the frame into its bounded
-     * queue; the driver buffer is released on return. */
-    if (backend.coproc != NULL) {
+     * queue, so the driver-owned RX buffer can be released immediately after
+     * wlh_coproc_ethernet_sta_send returns. */
+    ++sta_rxcb_frames;
+    if (throttled_log(sta_rxcb_frames))
+        ESP_LOGI(
+            TAG,
+            "datapath: wifi rx -> host #%lu len=%u",
+            (unsigned long)sta_rxcb_frames,
+            (unsigned)length
+        );
+    if (backend.coproc != NULL && buffer != NULL && length > 0u) {
         (void)wlh_coproc_ethernet_sta_send(
             backend.coproc, buffer, (size_t)length
         );
     }
+    if (eb != NULL)
+        esp_wifi_internal_free_rx_buffer(eb);
     return ESP_OK;
 }
 
 static esp_err_t ap_rx_callback(void *buffer, uint16_t length, void *eb) {
-    (void)eb;
-    if (backend.coproc != NULL) {
+    if (backend.coproc != NULL && buffer != NULL && length > 0u) {
         (void)wlh_coproc_ethernet_ap_send(
             backend.coproc, buffer, (size_t)length
         );
     }
+    if (eb != NULL)
+        esp_wifi_internal_free_rx_buffer(eb);
     return ESP_OK;
 }
 
@@ -317,9 +339,14 @@ int wlh_wifi_backend_initialize(
     if (esp_wifi_set_mode(mode) != ESP_OK)
         return -1;
     backend.interface_flags = interface_flags;
-    if (esp_wifi_start() != ESP_OK)
-        return -1;
+    /* Record the operation before esp_wifi_start(): the STA_START event is
+       delivered from the event-loop task and can run before esp_wifi_start()
+       returns, so the handler must already see it. */
     backend.initialize_operation_id = operation_id;
+    if (esp_wifi_start() != ESP_OK) {
+        backend.initialize_operation_id = 0u;
+        return -1;
+    }
     backend.driver_started = true;
     (void)esp_wifi_internal_reg_rxcb(WIFI_IF_STA, sta_rx_callback);
     ESP_LOGI(
@@ -523,9 +550,39 @@ void wlh_wifi_backend_ethernet_ap_tx(
 void wlh_wifi_backend_ethernet_tx(
     void *context, const uint8_t *frame, size_t size
 ) {
+    esp_err_t result;
     (void)context;
-    if (!backend.connected || frame == NULL || size == 0u || size > 1518u)
+    if (!backend.connected || frame == NULL || size == 0u || size > 1518u) {
+        ++sta_tx_dropped;
+        if (throttled_log(sta_tx_dropped))
+            ESP_LOGW(
+                TAG,
+                "datapath: host->wifi drop #%lu connected=%d size=%u",
+                (unsigned long)sta_tx_dropped,
+                (int)backend.connected,
+                (unsigned)size
+            );
         return;
+    }
     /* esp_wifi_internal_tx copies the frame into the Wi-Fi driver queue. */
-    (void)esp_wifi_internal_tx(WIFI_IF_STA, (void *)frame, (uint16_t)size);
+    result = esp_wifi_internal_tx(WIFI_IF_STA, (void *)frame, (uint16_t)size);
+    if (result != ESP_OK) {
+        ++sta_tx_errors;
+        if (throttled_log(sta_tx_errors))
+            ESP_LOGW(
+                TAG,
+                "datapath: wifi tx failed #%lu: %s",
+                (unsigned long)sta_tx_errors,
+                esp_err_to_name(result)
+            );
+        return;
+    }
+    ++sta_tx_frames;
+    if (throttled_log(sta_tx_frames))
+        ESP_LOGI(
+            TAG,
+            "datapath: host -> wifi tx #%lu size=%u",
+            (unsigned long)sta_tx_frames,
+            (unsigned)size
+        );
 }

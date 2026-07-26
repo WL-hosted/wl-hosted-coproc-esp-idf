@@ -106,7 +106,7 @@ void app_main(void) {
     config.initial_credit = 64u;
     config.core_queue_depth = 16u;
     config.stop_timeout_ms = 3000u;
-    config.core_task = (wlh_osal_task_attributes_t){"wlh-core", 8192u, 5};
+    config.core_task = (wlh_osal_task_attributes_t){"wlh-core", 8192u, 7};
 
     if (wlh_coproc_init(&coproc, &config) != WLH_COPROC_OK) {
         ESP_LOGE(TAG, "coproc init failed");

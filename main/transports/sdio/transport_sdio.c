@@ -232,8 +232,20 @@ static void rx_task_main(void *argument) {
                 (unsigned)size
             );
         } else {
-            wlh_coproc_result_t core_result =
-                wlh_coproc_on_frame(transport.coproc, frame, size);
+            wlh_coproc_result_t core_result;
+            /*
+             * Match esp-hosted-mcu's ownership model: do not reload this
+             * slave RX buffer until the bounded Core queue has accepted the
+             * frame. In particular, CreditUpdate and heartbeat frames must
+             * not be dropped behind a burst of Wi-Fi Ethernet jobs.
+             */
+            do {
+                core_result =
+                    wlh_coproc_on_frame(transport.coproc, frame, size);
+                if (core_result == WLH_COPROC_BACKEND_ERROR)
+                    vTaskDelay(pdMS_TO_TICKS(1u));
+            } while (core_result == WLH_COPROC_BACKEND_ERROR &&
+                     !atomic_load(&transport.resetting));
             if (core_result != WLH_COPROC_OK) {
                 ESP_LOGW(
                     TAG, "core rejected SDIO frame: result=%d", (int)core_result
@@ -293,8 +305,10 @@ static void reset_task_main(void *argument) {
         for (index = 0u; index < count; ++index) {
             heap_caps_free(dma_frames[index]);
             complete_job(&jobs[index], -1);
+            /* Return the window token held by each reclaimed in-flight
+               job so the TX path restarts with a full window. */
+            xSemaphoreGive(transport.tx_window);
         }
-        xSemaphoreGive(transport.tx_window);
         atomic_store(&transport.resetting, false);
         if (transport.on_reset != NULL)
             transport.on_reset(transport.reset_context);
@@ -353,34 +367,35 @@ int wlh_transport_start(const wlh_transport_config_t *config) {
         xQueueCreate(CONFIG_WLH_SDIO_TX_QUEUE_DEPTH, sizeof(tx_job_t));
     transport.events = xEventGroupCreate();
     transport.state_lock = xSemaphoreCreateMutex();
-    transport.tx_window = xSemaphoreCreateBinary();
+    transport.tx_window = xSemaphoreCreateCounting(
+        CONFIG_WLH_SDIO_TX_QUEUE_DEPTH, CONFIG_WLH_SDIO_TX_QUEUE_DEPTH
+    );
     if (transport.tx_queue == NULL || transport.events == NULL ||
         transport.state_lock == NULL || transport.tx_window == NULL ||
         initialize_driver() != 0) {
         ESP_LOGE(TAG, "SDIO transport initialization failed");
         return -1;
     }
-    xSemaphoreGive(transport.tx_window);
     if (xTaskCreate(
-            tx_task_main, "wlh-sdio-tx", 4096u, NULL, 6, &transport.tx_task
+            tx_task_main, "wlh-sdio-tx", 4096u, NULL, 8, &transport.tx_task
         ) != pdPASS ||
         xTaskCreate(
             tx_done_task_main,
             "wlh-sdio-done",
             4096u,
             NULL,
-            7,
+            9,
             &transport.tx_done_task
         ) != pdPASS ||
         xTaskCreate(
-            rx_task_main, "wlh-sdio-rx", 4096u, NULL, 6, &transport.rx_task
+            rx_task_main, "wlh-sdio-rx", 4096u, NULL, 8, &transport.rx_task
         ) != pdPASS ||
         xTaskCreate(
             reset_task_main,
             "wlh-sdio-reset",
             4096u,
             NULL,
-            7,
+            9,
             &transport.reset_task
         ) != pdPASS) {
         ESP_LOGE(TAG, "SDIO task creation failed");

@@ -109,7 +109,7 @@ ESP32-C6 固定引脚、外部上拉、时序和 reset 约定见
 main/
 ├─ app/             # app_main 与通用 link reset 控制
 ├─ backends/        # esp_wifi backend
-├─ services/        # Device Info、User Passthrough
+├─ services/        # Device Info、User Passthrough、IO、ADC、KV、pin profile
 ├─ transports/
 │  ├─ transport.h   # Adapter 内部统一 transport 接口
 │  ├─ usb/          # ESP32-S3 CherryUSB bulk
@@ -141,10 +141,45 @@ ESP-IDF/FreeRTOS/USB/SDIO 细节只存在于本 Adapter。
 - STA/AP Ethernet TX/RX；
 - AP client join/leave event；
 - Device Information；
-- RPC 形式的 User Passthrough。
+- RPC 形式的 User Passthrough；
+- IO configure / read / write；
+- ADC read；
+- KV read / write / erase。
 
-未实现 Bluetooth、OTA、extended Diagnostics、IO、ADC、KV 和
-User-Passthrough raw stream channel。
+未实现 Bluetooth、OTA、extended Diagnostics 和 User-Passthrough raw stream
+channel。
+
+### 逻辑 pin 表
+
+IO 和 ADC 的 `pin_id` 是 profile 定义的逻辑编号，不是厂商 GPIO 编号。映射表在
+`main/services/pin_profile.c` 中按 target 编译，被 transport、flash、PSRAM、
+strapping 和 USB-JTAG 占用的引脚不会出现在表里，host 无法通过 IO 服务扰乱链路。
+
+| 逻辑 pin | ESP32-S3 (USB) | ESP32-C6 (SDIO) |
+|---:|---|---|
+| 0 | GPIO4 · ADC1_CH3 | GPIO0 · ADC1_CH0 |
+| 1 | GPIO5 · ADC1_CH4 | GPIO1 · ADC1_CH1 |
+| 2 | GPIO6 · ADC1_CH5 | GPIO2 · ADC1_CH2 |
+| 3 | GPIO7 · ADC1_CH6 | GPIO3 · ADC1_CH3 |
+| 4 | GPIO15 | GPIO6 · ADC1_CH6 |
+| 5 | GPIO16 | GPIO7 |
+| 6 | GPIO17 | GPIO10 |
+| 7 | GPIO18 | GPIO11 |
+
+只暴露 ADC1：Wi-Fi 运行期间 ADC2 不可用。无 ADC 能力的 pin 返回
+`PERIPHERAL/NOT_SUPPORTED`，表外的 pin 返回 `PERIPHERAL/NOT_FOUND`。
+读写未配置的 pin，或写一个 INPUT pin，返回 `PERIPHERAL/NOT_READY`
+（协议未发布 INVALID_STATE，Core 映射到语义最接近的 NOT_READY）。
+OPEN_DRAIN 下 `level=true` 表示释放线路。
+
+### KV 存储布局
+
+ESP-IDF 的 NVS entry 名上限是 15 字符，而协议允许 64 字节 key。因此
+`main/services/kv_service.c` 在 namespace `wlh_kv` 下用 key 的 FNV-1a 64-bit
+哈希（15 位十六进制）作为 entry 名，blob 内容是 `完整 key` + `\0` + `value`。
+读取和擦除都会比对 blob 内嵌的完整 key，哈希碰撞返回 `STORAGE/NOT_FOUND`
+而不是另一个 key 的值。每次写入后立即 `nvs_commit`，host 收到 OK 即可依赖该
+值在复位后仍然存在。
 
 ## CI 和格式化
 

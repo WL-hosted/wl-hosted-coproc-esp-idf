@@ -9,8 +9,11 @@
 #include "freertos/task.h"
 #include "nvs_flash.h"
 
+#include "adc_service.h"
 #include "device_info.h"
 #include "firmware_config.h"
+#include "io_service.h"
+#include "kv_service.h"
 #include "transport.h"
 #include "user_passthrough.h"
 #include "wifi_backend.h"
@@ -76,7 +79,23 @@ void app_main(void) {
         WLH_BOARD_PROFILE
     );
 
-    (void)nvs_flash_init();
+    /* The KV service persists host data here, so a partition left over from a
+     * different NVS layout is erased rather than ignored. */
+    {
+        esp_err_t nvs_status = nvs_flash_init();
+        if (nvs_status == ESP_ERR_NVS_NO_FREE_PAGES ||
+            nvs_status == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+            ESP_LOGW(TAG, "erasing incompatible NVS partition");
+            ESP_ERROR_CHECK(nvs_flash_erase());
+            nvs_status = nvs_flash_init();
+        }
+        if (nvs_status != ESP_OK)
+            ESP_LOGE(
+                TAG,
+                "NVS unavailable, KV service will fail: %s",
+                esp_err_to_name(nvs_status)
+            );
+    }
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
@@ -101,6 +120,9 @@ void app_main(void) {
                                           wlh_wifi_backend_stop_ap};
     config.device_info = wlh_device_info_ops();
     config.user_passthrough = wlh_user_passthrough_ops(&coproc);
+    config.io = wlh_io_ops();
+    config.adc = wlh_adc_ops();
+    config.kv = wlh_kv_ops();
     config.max_frame_size = wlh_transport_max_frame_size();
     config.heartbeat_interval_ms = 1000u;
     config.initial_credit = 64u;

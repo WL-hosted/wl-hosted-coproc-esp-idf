@@ -1,10 +1,16 @@
 set(wlh_sources
     "app/app_main.c"
     "backends/wifi_backend.c"
+    "services/adc_service.c"
     "services/device_info.c"
+    "services/io_service.c"
+    "services/kv_service.c"
+    "services/pin_profile.c"
     "services/user_passthrough.c"
 )
 set(wlh_private_requirements
+    esp_adc
+    esp_driver_gpio
     esp_event
     esp_netif
     esp_wifi

@@ -47,7 +47,9 @@ jobs:
             reconfigure build
 
       - name: Verify dependency locks
-        run: git diff --exit-code -- dependencies.lock.esp32s3 dependencies.lock.esp32c6
+        run: |
+          git -c safe.directory='*' status --short
+          git -c safe.directory='*' diff --no-renames --exit-code -- dependencies.lock.esp32s3 dependencies.lock.esp32c6
 
       - name: Collect firmware
         env:

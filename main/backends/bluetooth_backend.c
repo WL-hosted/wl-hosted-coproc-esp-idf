@@ -27,11 +27,6 @@
  * All other HCI (command status/complete, connection events, ACL) is
  * reliable and must never be dropped silently. */
 #define HCI_H4_EVT 0x04u
-#define HCI_EVT_LE_META 0x3eu
-#define HCI_LE_SUBEV_ADV_REPORT 0x02u
-#define HCI_LE_SUBEV_DIRECT_ADV_REPORT 0x0bu
-#define HCI_LE_SUBEV_EXT_ADV_REPORT 0x0du
-#define HCI_LE_SUBEV_PERIODIC_ADV_REPORT 0x0fu
 /* Slots kept in reserve for reliable HCI so an advertising-report flood can
  * never starve a critical frame. At least one; a quarter of the pool. */
 #define WLH_BT_RX_ADV_RESERVE                                                  \
@@ -107,14 +102,8 @@ static void vhci_send_available(void) {
  * at a rate no host-side flow control can bound. `packet` starts with its H4
  * type byte. */
 static bool hci_is_droppable_adv_report(const uint8_t *packet, uint16_t size) {
-    uint8_t subevent;
-    if (size < 4u || packet[0] != HCI_H4_EVT || packet[1] != HCI_EVT_LE_META)
-        return false;
-    subevent = packet[3];
-    return subevent == HCI_LE_SUBEV_ADV_REPORT ||
-           subevent == HCI_LE_SUBEV_DIRECT_ADV_REPORT ||
-           subevent == HCI_LE_SUBEV_EXT_ADV_REPORT ||
-           subevent == HCI_LE_SUBEV_PERIODIC_ADV_REPORT;
+    return size >= 1u && packet[0] == HCI_H4_EVT &&
+           wlh_hci_event_is_adv_report(packet + 1u, (size_t)size - 1u);
 }
 
 /* Runs on the controller task. `data` starts with the H4 type byte and is

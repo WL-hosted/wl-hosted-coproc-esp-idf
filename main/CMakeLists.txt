@@ -9,13 +9,19 @@ set(wlh_sources
     "services/user_passthrough.c"
 )
 set(wlh_private_requirements
+    bt
     esp_adc
     esp_driver_gpio
     esp_event
+    esp_hw_support
     esp_netif
     esp_wifi
     nvs_flash
 )
+
+if(CONFIG_WLH_ENABLE_BLUETOOTH_CONTROLLER)
+    list(APPEND wlh_sources "backends/bluetooth_backend.c")
+endif()
 
 if(CONFIG_WLH_TRANSPORT_USB OR
    (NOT DEFINED CONFIG_WLH_TRANSPORT_USB AND IDF_TARGET STREQUAL "esp32s3"))

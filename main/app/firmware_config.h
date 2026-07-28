@@ -15,8 +15,15 @@
 #error "No WL-hosted transport selected"
 #endif
 
+#if CONFIG_WLH_ENABLE_BLUETOOTH_CONTROLLER
+#define WLH_PROFILE_FEATURE_SEGMENT "wifi-ble"
+#else
+#define WLH_PROFILE_FEATURE_SEGMENT "wifi"
+#endif
+
 #define WLH_BOARD_PROFILE                                                      \
     "espressif." CONFIG_IDF_TARGET                                             \
-    "." WLH_PROFILE_BOARD_SEGMENT WLH_TRANSPORT_NAME "-wifi"
+    "." WLH_PROFILE_BOARD_SEGMENT WLH_TRANSPORT_NAME                           \
+    "-" WLH_PROFILE_FEATURE_SEGMENT
 
 #endif

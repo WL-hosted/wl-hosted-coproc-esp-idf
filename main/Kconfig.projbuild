@@ -14,6 +14,28 @@ menu "WL-hosted Coprocessor Configuration"
             depends on IDF_TARGET_ESP32C6 && SOC_SDIO_SLAVE_SUPPORTED
     endchoice
 
+    config WLH_ENABLE_BLUETOOTH_CONTROLLER
+        bool "Enable Bluetooth Controller service"
+        depends on BT_ENABLED
+        default y
+        help
+            Publishes the Bluetooth Controller service and the HCI raw
+            channel to the host over the WL-hosted link. Requires the
+            Bluetooth controller in controller-only (VHCI) mode. Disable
+            for Wi-Fi-only firmware.
+
+    config WLH_BLUETOOTH_HCI_QUEUE_DEPTH
+        int "Bluetooth HCI slot count per direction"
+        depends on WLH_ENABLE_BLUETOOTH_CONTROLLER
+        range 4 32
+        default 16
+
+    config WLH_BLUETOOTH_MAX_HCI_PACKET
+        int "Bluetooth maximum HCI packet payload"
+        depends on WLH_ENABLE_BLUETOOTH_CONTROLLER
+        range 255 1024
+        default 1024
+
     menu "SDIO transport"
         depends on WLH_TRANSPORT_SDIO
 

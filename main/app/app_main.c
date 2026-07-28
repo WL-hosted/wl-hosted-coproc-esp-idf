@@ -20,6 +20,10 @@
 #include "wlh/coproc.h"
 #include "wlh/freertos_osal.h"
 
+#if CONFIG_WLH_ENABLE_BLUETOOTH_CONTROLLER
+#include "bluetooth_backend.h"
+#endif
+
 #pragma message("WLH PROFILE: " WLH_BOARD_PROFILE)
 
 #define LINK_EVENT_TRANSPORT_RESET (1u << 0)
@@ -60,6 +64,9 @@ static void link_control_task(void *argument) {
         /* Let the re-enumeration settle before re-accepting frames. */
         vTaskDelay(pdMS_TO_TICKS(100u));
         ESP_LOGW(TAG, "transport reset: restarting link core");
+#if CONFIG_WLH_ENABLE_BLUETOOTH_CONTROLLER
+        wlh_bluetooth_backend_reset();
+#endif
         if (wlh_coproc_stop(&coproc) != WLH_COPROC_OK)
             ESP_LOGW(TAG, "core stop failed during restart");
         if (wlh_coproc_start(&coproc) != WLH_COPROC_OK)
@@ -123,6 +130,9 @@ void app_main(void) {
     config.io = wlh_io_ops();
     config.adc = wlh_adc_ops();
     config.kv = wlh_kv_ops();
+#if CONFIG_WLH_ENABLE_BLUETOOTH_CONTROLLER
+    config.bluetooth = wlh_bluetooth_backend_ops();
+#endif
     config.max_frame_size = wlh_transport_max_frame_size();
     config.heartbeat_interval_ms = 1000u;
     config.initial_credit = 64u;
@@ -138,6 +148,12 @@ void app_main(void) {
         ESP_LOGE(TAG, "wifi backend init failed");
         abort();
     }
+#if CONFIG_WLH_ENABLE_BLUETOOTH_CONTROLLER
+    if (wlh_bluetooth_backend_init(&coproc) != 0) {
+        ESP_LOGE(TAG, "bluetooth backend init failed");
+        abort();
+    }
+#endif
 
     memset(&transport_config, 0, sizeof(transport_config));
     transport_config.coproc = &coproc;

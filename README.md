@@ -1,13 +1,19 @@
 # WL-hosted Coprocessor ESP-IDF Adapter
 
 `wl-hosted-coproc-esp-idf` 将平台无关的 WL-hosted Coprocessor Core
-适配到 ESP-IDF。固件使用 FreeRTOS OSAL、真实 `esp_wifi` 后端，并支持两种
-硬件传输：
+适配到 ESP-IDF。固件使用 FreeRTOS OSAL、真实 `esp_wifi` 后端、ESP VHCI
+Bluetooth Controller 后端，并支持两种硬件传输：
 
 | ESP-IDF target | Transport | Profile | 最大帧 |
 |---|---|---|---:|
-| ESP32-S3 | CherryUSB vendor bulk | `espressif.esp32s3.coreboard.usb-wifi` | 4096 |
-| ESP32-C6 | ESP-IDF SDIO Slave | `espressif.esp32c6.sdio-wifi` | 4092 |
+| ESP32-S3 | CherryUSB vendor bulk | `espressif.esp32s3.coreboard.usb-wifi-ble` | 4096 |
+| ESP32-C6 | ESP-IDF SDIO Slave | `espressif.esp32c6.sdio-wifi-ble` | 4092 |
+
+Profile 名中的 `-ble` 后缀表示固件公布 Bluetooth Controller Service
+（`0x0003`）和 HCI Raw Channel（`0x04`）。Host 通过 Hello 广告中的
+Service/Channel 表检测该能力，不解析 profile 字符串；关闭
+`CONFIG_WLH_ENABLE_BLUETOOTH_CONTROLLER` 后 profile 退回 `*-wifi`，
+Hello 不公布 Bluetooth Service/Channel，行为与 Wi-Fi-only 固件一致。
 
 ESP32-S3 没有 SDIO Slave 外设，因此不能在同一块 S3 硬件上切换为 SDIO。
 Kconfig 会根据目标芯片只显示硬件支持的传输：S3 默认为 USB，C6 默认为
@@ -20,7 +26,8 @@ ESP-IDF Adapter
   ├─ USB bulk（ESP32-S3）或 SDIO Slave（ESP32-C6）
   ├─ core/coproc-core（link/session/credit/RPC）
   ├─ core/common FreeRTOS OSAL
-  └─ esp_wifi STA/AP/SoftAP backend
+  ├─ esp_wifi STA/AP/SoftAP backend
+  └─ ESP VHCI Bluetooth Controller backend（controller-only，BLE）
 ```
 
 Simulator IPC sideband 不进入真实硬件传输。USB 和 SDIO 都直接承载标准
@@ -108,7 +115,7 @@ ESP32-C6 固定引脚、外部上拉、时序和 reset 约定见
 ```text
 main/
 ├─ app/             # app_main 与通用 link reset 控制
-├─ backends/        # esp_wifi backend
+├─ backends/        # esp_wifi 与 ESP VHCI Bluetooth backend
 ├─ services/        # Device Info、User Passthrough、IO、ADC、KV、pin profile
 ├─ transports/
 │  ├─ transport.h   # Adapter 内部统一 transport 接口
@@ -125,7 +132,9 @@ ESP-IDF/FreeRTOS/USB/SDIO 细节只存在于本 Adapter。
 ## 运行模型
 
 - `wlh-core`：Coprocessor Core 状态机与 RPC。
-- `wlh-link-ctrl`：在 transport reset 后停止并重启 Core。
+- `wlh-link-ctrl`：在 transport reset 后停止并重启 Core；重启前先同步
+  reset Bluetooth backend。
+- `wlh-bt`：Bluetooth Controller lifecycle 与双向 HCI 数据路径。
 - USB：独立 TX/RX task 和 CherryUSB ISR。
 - SDIO：独立 TX、TX completion、RX 和 reset task。
 - Wi-Fi：ESP-IDF event task 将异步结果上报 Core。
@@ -144,10 +153,31 @@ ESP-IDF/FreeRTOS/USB/SDIO 细节只存在于本 Adapter。
 - RPC 形式的 User Passthrough；
 - IO configure / read / write；
 - ADC read；
-- KV read / write / erase。
+- KV read / write / erase；
+- Bluetooth Controller initialize / enable / disable / deinitialize /
+  get info，以及 HCI Raw Channel（H4 Command/ACL/Event）。
 
-未实现 Bluetooth、OTA、extended Diagnostics 和 User-Passthrough raw stream
+未实现 OTA、extended Diagnostics 和 User-Passthrough raw stream
 channel。
+
+### Bluetooth Controller backend
+
+`main/backends/bluetooth_backend.c` 将 Coprocessor Core 的 Bluetooth ops
+映射到 ESP-IDF controller-only（VHCI）模式，仅启用 BLE：
+
+- 每方向 `CONFIG_WLH_BLUETOOTH_HCI_QUEUE_DEPTH`（默认 16）个固定 HCI
+  slot，slot 大小 1 字节 H4 type + `CONFIG_WLH_BLUETOOTH_MAX_HCI_PACKET`
+  （默认 1024）字节 payload，初始化时一次性创建，之后无动态分配；
+- VHCI callback 只复制数据并唤醒 `wlh-bt` task；RX slot 耗尽视为
+  backpressure 违约，进入 ERROR 并发 STATE_CHANGED；
+- Core NO_CREDIT 时保留 RX slot，等 `hci_tx_ready` 通知后重试；
+- `DEINITIALIZE(release_memory=true)` 被拒绝：ESP32 释放 controller
+  memory 是单向操作，恢复需要芯片复位；
+- GET_INFO 的 `public_address` 来自 `esp_read_mac(ESP_MAC_BT)`；
+  `hci_version`、`manufacturer_id`、`feature_bits` 无公开 API，保持 0。
+
+C6 因 BLE controller 使 app 超过 1 MB，target 默认值切换到 4 MB flash 的
+`SINGLE_APP_LARGE` 分区布局。
 
 ### 逻辑 pin 表
 

@@ -21,6 +21,22 @@
 #define WLH_BT_REASON_RX_OVERFLOW 2u
 #define WLH_BT_REASON_CONTROLLER_FAILURE 3u
 
+/* Controller->host HCI classification. LE advertising/scan reports arrive
+ * from the air at a rate no host-side flow control can bound, so they are
+ * best-effort: shedding them under RX pool pressure is normal, not fatal.
+ * All other HCI (command status/complete, connection events, ACL) is
+ * reliable and must never be dropped silently. */
+#define HCI_H4_EVT 0x04u
+#define HCI_EVT_LE_META 0x3eu
+#define HCI_LE_SUBEV_ADV_REPORT 0x02u
+#define HCI_LE_SUBEV_DIRECT_ADV_REPORT 0x0bu
+#define HCI_LE_SUBEV_EXT_ADV_REPORT 0x0du
+#define HCI_LE_SUBEV_PERIODIC_ADV_REPORT 0x0fu
+/* Slots kept in reserve for reliable HCI so an advertising-report flood can
+ * never starve a critical frame. At least one; a quarter of the pool. */
+#define WLH_BT_RX_ADV_RESERVE                                                  \
+    ((WLH_BT_SLOT_COUNT / 4u) > 0u ? (WLH_BT_SLOT_COUNT / 4u) : 1u)
+
 #define EV_CMD (1u << 0)
 #define EV_TX (1u << 1)
 #define EV_RX (1u << 2)
@@ -67,6 +83,7 @@ typedef struct bluetooth_backend {
     uint32_t fatal_reason;
     uint32_t rx_overflows;
     uint32_t rx_rejected;
+    uint32_t rx_adv_dropped;
 } bluetooth_backend_t;
 
 static bluetooth_backend_t backend;
@@ -86,17 +103,48 @@ static void vhci_send_available(void) {
     xEventGroupSetBits(backend.events, EV_VHCI_SEND);
 }
 
+/* True for best-effort LE advertising/scan reports, which the radio produces
+ * at a rate no host-side flow control can bound. `packet` starts with its H4
+ * type byte. */
+static bool hci_is_droppable_adv_report(const uint8_t *packet, uint16_t size) {
+    uint8_t subevent;
+    if (size < 4u || packet[0] != HCI_H4_EVT || packet[1] != HCI_EVT_LE_META)
+        return false;
+    subevent = packet[3];
+    return subevent == HCI_LE_SUBEV_ADV_REPORT ||
+           subevent == HCI_LE_SUBEV_DIRECT_ADV_REPORT ||
+           subevent == HCI_LE_SUBEV_EXT_ADV_REPORT ||
+           subevent == HCI_LE_SUBEV_PERIODIC_ADV_REPORT;
+}
+
 /* Runs on the controller task. `data` starts with the H4 type byte and is
- * only valid during the call, so it is copied into a fixed RX slot. Slot
- * exhaustion is a backpressure contract violation and turns fatal. */
+ * only valid during the call, so it is copied into a fixed RX slot.
+ *
+ * Advertising reports are best-effort: under RX pool pressure they are
+ * dropped here, before the Core assigns a wire sequence number, so no gap
+ * appears on the reliable HCI channel and the controller keeps running. A
+ * reserve keeps room for reliable HCI (command status/complete, connection
+ * events, ACL); losing one of those is a genuine backpressure contract
+ * violation and stays fatal. */
 static int vhci_receive(uint8_t *data, uint16_t length) {
     uint8_t index;
+    bool droppable;
     if (data == NULL || length < 2u ||
         (size_t)length > 1u + (size_t)WLH_BT_MAX_PACKET) {
         report_fatal(WLH_BT_REASON_CONTROLLER_FAILURE);
         return 0;
     }
+    droppable = hci_is_droppable_adv_report(data, length);
+    if (droppable &&
+        uxQueueMessagesWaiting(backend.rx_free) <= WLH_BT_RX_ADV_RESERVE) {
+        ++backend.rx_adv_dropped;
+        return 0;
+    }
     if (xQueueReceive(backend.rx_free, &index, 0) != pdTRUE) {
+        if (droppable) {
+            ++backend.rx_adv_dropped;
+            return 0;
+        }
         ++backend.rx_overflows;
         report_fatal(WLH_BT_REASON_RX_OVERFLOW);
         return 0;
@@ -214,10 +262,6 @@ static int controller_initialize(void) {
             return -1;
         }
     }
-    if (esp_vhci_host_register_callback(&vhci_callbacks) != ESP_OK) {
-        ESP_LOGE(TAG, "VHCI callback registration failed");
-        return -1;
-    }
     return 0;
 }
 
@@ -231,6 +275,10 @@ static int controller_enable(void) {
     result = esp_bt_controller_enable(ESP_BT_MODE_BLE);
     if (result != ESP_OK) {
         ESP_LOGE(TAG, "controller enable failed: %s", esp_err_to_name(result));
+        return -1;
+    }
+    if (esp_vhci_host_register_callback(&vhci_callbacks) != ESP_OK) {
+        ESP_LOGE(TAG, "VHCI callback registration failed");
         return -1;
     }
     return 0;

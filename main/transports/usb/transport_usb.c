@@ -29,7 +29,13 @@
  * buffered indefinitely. rx_feed() already reassembles the byte stream. */
 #define WLH_USB_OUT_CHUNK WLH_USB_EP_MPS
 #define WLH_USB_RX_RING_SIZE (2u * 4096u + 512u)
-#define WLH_USB_TX_QUEUE_DEPTH 8u
+/* Must be >= the host's controller->host BLE HCI credit window (host RX ring
+ * of 32 slots) plus headroom for RPC/link-control frames that share this
+ * queue. The Core assigns a sequence number before submitting, so a frame
+ * dropped here (queue full) leaves a permanent gap on the reliable HCI event
+ * channel; during scan bursts a lost scan-disable command-complete then
+ * strands the host in disc-active state and connect fails with EBUSY. */
+#define WLH_USB_TX_QUEUE_DEPTH 48u
 #define WLH_USB_TX_TIMEOUT_MS 2000u
 #define WLH_USB_CONFIGURED_BIT (1u << 0)
 #define WLH_USB_RESET_BIT (1u << 1)

@@ -32,7 +32,7 @@ jobs:
           submodules: recursive
 
       - name: Verify submodules
-        run: git submodule status --recursive
+        run: git -c safe.directory='*' submodule status --recursive
 
       - name: Configure and build
         env:

@@ -37,7 +37,9 @@ jobs:
       - name: Configure and build
         env:
           IDF_TARGET: ${{ matrix.target }}
+        shell: bash
         run: |
+          . "$IDF_PATH/export.sh"
           idf.py \
             -B "build-${IDF_TARGET}" \
             -D "IDF_TARGET=${IDF_TARGET}" \

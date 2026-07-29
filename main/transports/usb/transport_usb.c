@@ -36,6 +36,9 @@
  * channel; during scan bursts a lost scan-disable command-complete then
  * strands the host in disc-active state and connect fails with EBUSY. */
 #define WLH_USB_TX_QUEUE_DEPTH 48u
+#define WLH_USB_CONTROL_TX_QUEUE_DEPTH 4u
+#define WLH_USB_DATA_TX_QUEUE_DEPTH                                            \
+    (WLH_USB_TX_QUEUE_DEPTH - WLH_USB_CONTROL_TX_QUEUE_DEPTH)
 #define WLH_USB_TX_TIMEOUT_MS 2000u
 #define WLH_USB_CONFIGURED_BIT (1u << 0)
 #define WLH_USB_RESET_BIT (1u << 1)
@@ -45,6 +48,7 @@
 #define FRAME_MAGIC_BYTE1 0x4cu
 #define FRAME_PROTOCOL_MAJOR 1u
 #define FRAME_FLAGS_MASK 0x03u
+#define FRAME_CHANNEL_OFFSET 4u
 
 static const char *TAG = "wlh-usb";
 
@@ -61,7 +65,8 @@ typedef struct usb_transport {
     wlh_transport_reset_fn on_reset;
     void *reset_context;
 
-    QueueHandle_t tx_queue;
+    QueueHandle_t tx_control_queue;
+    QueueHandle_t tx_data_queue;
     SemaphoreHandle_t tx_done;
     EventGroupHandle_t events;
     RingbufHandle_t rx_ring;
@@ -85,6 +90,13 @@ static usb_transport_t transport;
 static DMA_ATTR uint8_t out_chunk[WLH_USB_OUT_CHUNK];
 static char serial_string[13];
 static const char langid_string[] = {0x09, 0x04};
+
+static bool is_control_frame(const uint8_t *frame, size_t size) {
+    if (frame == NULL || size < FRAME_HEADER_SIZE)
+        return false;
+    return frame[FRAME_CHANNEL_OFFSET] == WLH_CHANNEL_LINK_CONTROL ||
+           frame[FRAME_CHANNEL_OFFSET] == WLH_CHANNEL_CONTROL_RPC;
+}
 
 /* ------------------------------------------------------------------ */
 /* Descriptors                                                         */
@@ -270,8 +282,18 @@ int wlh_transport_submit_tx(
     job.completion_context = completion_context;
     if (atomic_load(&transport.stopping))
         return -1;
-    if (xQueueSend(transport.tx_queue, &job, 0) != pdTRUE) {
-        ESP_LOGW(TAG, "tx queue full: dropping %u bytes", (unsigned)size);
+    if (xQueueSend(
+            is_control_frame(frame, size) ? transport.tx_control_queue
+                                          : transport.tx_data_queue,
+            &job,
+            0
+        ) != pdTRUE) {
+        ESP_LOGW(
+            TAG,
+            "%s tx queue full: dropping %u bytes",
+            is_control_frame(frame, size) ? "control" : "data",
+            (unsigned)size
+        );
         return -1;
     }
     return 0;
@@ -279,10 +301,17 @@ int wlh_transport_submit_tx(
 
 static void flush_tx_queue(int status) {
     tx_job_t job;
-    while (xQueueReceive(transport.tx_queue, &job, 0) == pdTRUE) {
-        if (job.frame == NULL)
-            continue;
-        job.completion(job.completion_context, job.frame, job.size, status);
+    QueueHandle_t queues[] = {
+        transport.tx_control_queue,
+        transport.tx_data_queue,
+    };
+    size_t index;
+    for (index = 0u; index < sizeof(queues) / sizeof(queues[0]); ++index) {
+        while (xQueueReceive(queues[index], &job, 0) == pdTRUE) {
+            if (job.frame == NULL)
+                continue;
+            job.completion(job.completion_context, job.frame, job.size, status);
+        }
     }
 }
 
@@ -302,8 +331,9 @@ static void usb_stack_register(void) {
 static void usb_stack_restart(void) {
     ESP_LOGW(
         TAG,
-        "restarting usb device stack (queue=%u, overruns=%lu)",
-        (unsigned)uxQueueMessagesWaiting(transport.tx_queue),
+        "restarting usb device stack (control=%u data=%u, overruns=%lu)",
+        (unsigned)uxQueueMessagesWaiting(transport.tx_control_queue),
+        (unsigned)uxQueueMessagesWaiting(transport.tx_data_queue),
         (unsigned long)transport.rx_overruns
     );
     (void)usbd_deinitialize(WLH_USB_BUS_ID);
@@ -333,7 +363,12 @@ static void tx_task_main(void *argument) {
                 transport.on_reset(transport.reset_context);
             continue;
         }
-        if (xQueueReceive(transport.tx_queue, &job, 0) != pdTRUE)
+        /* Control RPC/link frames must not wait behind a sustained Ethernet
+         * burst. Ethernet is best-effort; a delayed Hello/RPC response can
+         * otherwise time out the entire Host session. */
+        if (xQueueReceive(transport.tx_control_queue, &job, 0) != pdTRUE &&
+            xQueueReceive(transport.tx_data_queue, &job, pdMS_TO_TICKS(100u)) !=
+                pdTRUE)
             continue;
         if (job.frame == NULL)
             break;
@@ -427,7 +462,10 @@ int wlh_transport_start(const wlh_transport_config_t *config) {
     transport.on_reset = config->on_reset;
     transport.reset_context = config->reset_context;
 
-    transport.tx_queue = xQueueCreate(WLH_USB_TX_QUEUE_DEPTH, sizeof(tx_job_t));
+    transport.tx_control_queue =
+        xQueueCreate(WLH_USB_CONTROL_TX_QUEUE_DEPTH, sizeof(tx_job_t));
+    transport.tx_data_queue =
+        xQueueCreate(WLH_USB_DATA_TX_QUEUE_DEPTH, sizeof(tx_job_t));
     transport.tx_done = xSemaphoreCreateBinary();
     transport.events = xEventGroupCreate();
     transport.rx_ring = xRingbufferCreateStatic(
@@ -436,8 +474,9 @@ int wlh_transport_start(const wlh_transport_config_t *config) {
         transport.rx_ring_storage,
         &transport.rx_ring_struct
     );
-    if (transport.tx_queue == NULL || transport.tx_done == NULL ||
-        transport.events == NULL || transport.rx_ring == NULL) {
+    if (transport.tx_control_queue == NULL || transport.tx_data_queue == NULL ||
+        transport.tx_done == NULL || transport.events == NULL ||
+        transport.rx_ring == NULL) {
         ESP_LOGE(TAG, "transport allocation failed");
         return -1;
     }

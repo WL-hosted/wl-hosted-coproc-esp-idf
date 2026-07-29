@@ -38,8 +38,11 @@ typedef struct wifi_backend {
     uint32_t interface_flags;
     bool driver_started;
     bool connected;
+    bool sta_mac_valid;
+    uint8_t sta_mac[6];
     bool disconnect_locally;
     bool ap_active;
+    uint32_t sta_reported_session_id;
 } wifi_backend_t;
 
 static wifi_backend_t backend;
@@ -85,6 +88,46 @@ static uint32_t map_disconnect_reason(uint8_t reason) {
     }
 }
 
+/* A USB transport reset creates a new WL-hosted session but does not tear
+ * down the ESP-IDF STA association.  ESP-IDF therefore does not emit another
+ * WIFI_EVENT_STA_CONNECTED when the new host asks to connect to the same AP.
+ * Keep the connected event construction in one place so that an existing
+ * association can be reported again and the new host session can bring its
+ * Ethernet netif up. */
+static wlh_coproc_result_t report_sta_connected(
+    const wifi_ap_record_t *ap_info
+) {
+    wlh_coproc_bss_t bss;
+
+    if (ap_info == NULL)
+        return WLH_COPROC_INVALID_ARGUMENT;
+    memset(&bss, 0, sizeof(bss));
+    bss.ssid = ap_info->ssid;
+    bss.ssid_size = strnlen((const char *)ap_info->ssid, sizeof(ap_info->ssid));
+    memcpy(bss.bssid, ap_info->bssid, sizeof(bss.bssid));
+    bss.channel = ap_info->primary;
+    bss.rssi_dbm = ap_info->rssi;
+    bss.security = map_security(ap_info->authmode);
+    if (esp_wifi_get_mac(WIFI_IF_STA, bss.interface_mac) != ESP_OK) {
+        ESP_LOGE(TAG, "failed to read STA MAC after connection");
+        return WLH_COPROC_BACKEND_ERROR;
+    }
+    memcpy(backend.sta_mac, bss.interface_mac, sizeof(backend.sta_mac));
+    backend.sta_mac_valid = true;
+    {
+        wlh_coproc_result_t result =
+            wlh_coproc_wifi_connected(backend.coproc, &bss);
+        if (result == WLH_COPROC_OK && backend.coproc != NULL)
+            backend.sta_reported_session_id = backend.coproc->session_id;
+        return result;
+    }
+}
+
+static bool sta_reported_for_current_session(void) {
+    return backend.coproc != NULL && backend.coproc->session_id != 0u &&
+           backend.sta_reported_session_id == backend.coproc->session_id;
+}
+
 /* Temporary datapath diagnostics: throttle logs to the first few frames and
    then every 100th to survive broadcast noise. */
 static uint32_t sta_rxcb_frames;
@@ -94,6 +137,22 @@ static uint32_t sta_tx_errors;
 
 static bool throttled_log(uint32_t count) {
     return count <= 5u || count % 100u == 0u;
+}
+
+static bool sta_frame_for_host(const uint8_t *frame, uint16_t length) {
+    static const uint8_t broadcast[6] = {
+        0xffu,
+        0xffu,
+        0xffu,
+        0xffu,
+        0xffu,
+        0xffu,
+    };
+
+    return length >= sizeof(broadcast) &&
+           (memcmp(frame, broadcast, sizeof(broadcast)) == 0 ||
+            (backend.sta_mac_valid &&
+             memcmp(frame, backend.sta_mac, sizeof(backend.sta_mac)) == 0));
 }
 
 static esp_err_t sta_rx_callback(void *buffer, uint16_t length, void *eb) {
@@ -108,7 +167,8 @@ static esp_err_t sta_rx_callback(void *buffer, uint16_t length, void *eb) {
             (unsigned long)sta_rxcb_frames,
             (unsigned)length
         );
-    if (backend.coproc != NULL && buffer != NULL && length > 0u) {
+    if (backend.coproc != NULL && buffer != NULL &&
+        sta_frame_for_host(buffer, length)) {
         (void)wlh_coproc_ethernet_sta_send(
             backend.coproc, buffer, (size_t)length
         );
@@ -205,22 +265,8 @@ static void wifi_event_handler(
     case WIFI_EVENT_STA_CONNECTED: {
         wifi_event_sta_connected_t *event = data;
         wifi_ap_record_t ap_info;
-        wlh_coproc_bss_t bss;
         wlh_coproc_result_t result;
-        memset(&bss, 0, sizeof(bss));
         backend.connected = true;
-        bss.ssid = event->ssid;
-        bss.ssid_size = event->ssid_len;
-        memcpy(bss.bssid, event->bssid, sizeof(bss.bssid));
-        if (esp_wifi_get_mac(WIFI_IF_STA, bss.interface_mac) != ESP_OK) {
-            ESP_LOGE(TAG, "failed to read STA MAC after connection");
-            memset(bss.interface_mac, 0, sizeof(bss.interface_mac));
-        }
-        bss.channel = event->channel;
-        if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
-            bss.rssi_dbm = ap_info.rssi;
-            bss.security = map_security(ap_info.authmode);
-        }
         ESP_LOGI(
             TAG,
             "event received: STA_CONNECTED ssid=%.*s channel=%u",
@@ -228,7 +274,15 @@ static void wifi_event_handler(
             (const char *)event->ssid,
             (unsigned)event->channel
         );
-        result = wlh_coproc_wifi_connected(backend.coproc, &bss);
+        if (esp_wifi_sta_get_ap_info(&ap_info) != ESP_OK) {
+            /* The SDK has already told us that association succeeded.  This
+             * should be transient, but do not manufacture a partial link
+             * event because the Host needs its STA MAC to bring netif up. */
+            ESP_LOGE(TAG, "failed to read AP record after connection");
+            result = WLH_COPROC_BACKEND_ERROR;
+        } else {
+            result = report_sta_connected(&ap_info);
+        }
         ESP_LOGI(TAG, "event complete: STA_CONNECTED report=%d", (int)result);
         break;
     }
@@ -239,6 +293,7 @@ static void wifi_event_handler(
         wlh_coproc_result_t result;
         backend.disconnect_locally = false;
         backend.connected = false;
+        backend.sta_mac_valid = false;
         ESP_LOGI(
             TAG,
             "event received: STA_DISCONNECTED reason=%u local=%u",
@@ -325,11 +380,28 @@ int wlh_wifi_backend_initialize(
     wifi_mode_t mode;
     (void)context;
     if (backend.driver_started) {
-        /* Already up: report completion inline. */
-        return wlh_coproc_wifi_initialized(backend.coproc, operation_id, 0) ==
-                       WLH_COPROC_OK
-                   ? 0
-                   : -1;
+        wifi_ap_record_t ap_info;
+        wlh_coproc_result_t initialized;
+
+        /* The driver and STA association survive a transport reset.  A
+         * freshly negotiated Host session still needs the link event, even
+         * though ESP-IDF will not re-emit STA_CONNECTED. */
+        initialized =
+            wlh_coproc_wifi_initialized(backend.coproc, operation_id, 0);
+        if (initialized != WLH_COPROC_OK)
+            return -1;
+        if (backend.connected && !sta_reported_for_current_session() &&
+            esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+            wlh_coproc_result_t report = report_sta_connected(&ap_info);
+            ESP_LOGI(
+                TAG,
+                "resynchronized existing STA association report=%d",
+                (int)report
+            );
+            if (report != WLH_COPROC_OK)
+                return -1;
+        }
+        return 0;
     }
     if (interface_flags == 0u || interface_flags > 3u)
         return -1;
@@ -415,6 +487,29 @@ int wlh_wifi_backend_connect(
             esp_err_to_name(result)
         );
         return -1;
+    }
+    if (backend.connected) {
+        wifi_ap_record_t ap_info;
+
+        /* Replaying CONNECT after a Host/USB session reset must restore the
+         * state event even though the STA never disconnected.  Only do this
+         * for the AP requested by the new Host; a different SSID still goes
+         * through ESP-IDF's normal reconnect path. */
+        if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK &&
+            strnlen((const char *)ap_info.ssid, sizeof(ap_info.ssid)) ==
+                request->ssid_size &&
+            memcmp(ap_info.ssid, request->ssid, request->ssid_size) == 0) {
+            if (!sta_reported_for_current_session()) {
+                wlh_coproc_result_t report = report_sta_connected(&ap_info);
+                ESP_LOGI(
+                    TAG,
+                    "resynchronized existing STA for CONNECT report=%d",
+                    (int)report
+                );
+                return report == WLH_COPROC_OK ? 0 : -1;
+            }
+            return 0;
+        }
     }
     backend.disconnect_locally = false;
     result = esp_wifi_connect();

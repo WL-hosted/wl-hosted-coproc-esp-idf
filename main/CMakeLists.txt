@@ -1,6 +1,7 @@
 set(wlh_sources
     "app/app_main.c"
     "backends/wifi_backend.c"
+    "backends/ota_backend.c"
     "services/adc_service.c"
     "services/device_info.c"
     "services/io_service.c"
@@ -17,6 +18,8 @@ set(wlh_private_requirements
     esp_netif
     esp_wifi
     nvs_flash
+    app_update
+    mbedtls
 )
 
 if(CONFIG_WLH_ENABLE_BLUETOOTH_CONTROLLER)

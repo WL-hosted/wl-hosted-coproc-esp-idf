@@ -17,6 +17,8 @@
 #include "transport.h"
 #include "user_passthrough.h"
 #include "wifi_backend.h"
+#include "ota_backend.h"
+#include "esp_app_desc.h"
 #include "wlh/coproc.h"
 #include "wlh/freertos_osal.h"
 
@@ -67,6 +69,7 @@ static void link_control_task(void *argument) {
 #if CONFIG_WLH_ENABLE_BLUETOOTH_CONTROLLER
         wlh_bluetooth_backend_reset();
 #endif
+        wlh_ota_backend_reset();
         if (wlh_coproc_stop(&coproc) != WLH_COPROC_OK)
             ESP_LOGW(TAG, "core stop failed during restart");
         if (wlh_coproc_start(&coproc) != WLH_COPROC_OK)
@@ -130,9 +133,19 @@ void app_main(void) {
     config.io = wlh_io_ops();
     config.adc = wlh_adc_ops();
     config.kv = wlh_kv_ops();
+    config.ota = wlh_ota_backend_ops();
+    strncpy(
+        config.implementation_version,
+        esp_app_get_description()->version,
+        sizeof(config.implementation_version) - 1u
+    );
 #if CONFIG_WLH_ENABLE_BLUETOOTH_CONTROLLER
     config.bluetooth = wlh_bluetooth_backend_ops();
 #endif
+    if (wlh_ota_backend_init(&coproc) != 0) {
+        ESP_LOGE(TAG, "OTA backend init failed");
+        abort();
+    }
     config.max_frame_size = wlh_transport_max_frame_size();
     config.heartbeat_interval_ms = 1000u;
     config.initial_credit = 64u;

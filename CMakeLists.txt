@@ -2,4 +2,4 @@ cmake_minimum_required(VERSION 3.16)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 idf_build_set_property(DEPENDENCIES_LOCK dependencies.lock.${IDF_TARGET})
-project(wlh_coproc_esp_idf VERSION 0.2.0 C)
+project(wlh_coproc_esp_idf VERSION 0.2.1 C)

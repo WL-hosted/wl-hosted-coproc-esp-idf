@@ -11,14 +11,14 @@
 
 #include "adc_service.h"
 #include "device_info.h"
+#include "esp_app_desc.h"
 #include "firmware_config.h"
 #include "io_service.h"
 #include "kv_service.h"
+#include "ota_backend.h"
 #include "transport.h"
 #include "user_passthrough.h"
 #include "wifi_backend.h"
-#include "ota_backend.h"
-#include "esp_app_desc.h"
 #include "wlh/coproc.h"
 #include "wlh/freertos_osal.h"
 

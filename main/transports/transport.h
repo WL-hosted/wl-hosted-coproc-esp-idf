@@ -32,6 +32,7 @@ int wlh_transport_submit_tx(
 );
 
 size_t wlh_transport_max_frame_size(void);
+size_t wlh_transport_tx_capacity(void);
 
 #ifdef __cplusplus
 }

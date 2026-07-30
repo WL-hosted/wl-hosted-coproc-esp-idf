@@ -153,6 +153,7 @@ void app_main(void) {
      * throughput collapses to one frame per round trip. */
     config.initial_credit = 256u;
     config.core_queue_depth = 64u;
+    config.ethernet_tx_depth = (uint8_t)wlh_transport_tx_capacity();
     config.stop_timeout_ms = 3000u;
     config.core_task = (wlh_osal_task_attributes_t){"wlh-core", 8192u, 7};
 

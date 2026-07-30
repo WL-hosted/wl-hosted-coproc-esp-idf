@@ -42,6 +42,9 @@
 #define WLH_USB_TX_TIMEOUT_MS 2000u
 #define WLH_USB_CONFIGURED_BIT (1u << 0)
 #define WLH_USB_RESET_BIT (1u << 1)
+#define WLH_USB_TX_WORK_NOTIFICATION (1u << 0)
+#define WLH_USB_TX_RESET_NOTIFICATION (1u << 1)
+#define WLH_USB_TX_TASK_PRIORITY 8u
 
 #define FRAME_HEADER_SIZE 24u
 #define FRAME_MAGIC_BYTE0 0x57u
@@ -75,6 +78,10 @@ typedef struct usb_transport {
     TaskHandle_t tx_task;
     TaskHandle_t rx_task;
     atomic_bool stopping;
+    /* The reset that precedes the first CONFIGURED event belongs to initial
+     * enumeration, before any WL-hosted session exists. Later resets must
+     * still tear down the active session even if reconfiguration is fast. */
+    atomic_bool initial_configuration_seen;
     /* Set on the first failed transfer; cleared when the host configures
      * the device again. Prevents restart cascades while the stack is
      * already re-enumerating or the cable is unplugged. */
@@ -275,6 +282,7 @@ int wlh_transport_submit_tx(
     void *completion_context
 ) {
     tx_job_t job;
+    QueueHandle_t queue;
     (void)context;
     job.frame = frame;
     job.size = size;
@@ -282,12 +290,9 @@ int wlh_transport_submit_tx(
     job.completion_context = completion_context;
     if (atomic_load(&transport.stopping))
         return -1;
-    if (xQueueSend(
-            is_control_frame(frame, size) ? transport.tx_control_queue
-                                          : transport.tx_data_queue,
-            &job,
-            0
-        ) != pdTRUE) {
+    queue = is_control_frame(frame, size) ? transport.tx_control_queue
+                                          : transport.tx_data_queue;
+    if (xQueueSend(queue, &job, 0) != pdTRUE) {
         ESP_LOGW(
             TAG,
             "%s tx queue full: dropping %u bytes",
@@ -296,6 +301,9 @@ int wlh_transport_submit_tx(
         );
         return -1;
     }
+    (void)xTaskNotify(
+        transport.tx_task, WLH_USB_TX_WORK_NOTIFICATION, eSetBits
+    );
     return 0;
 }
 
@@ -336,6 +344,12 @@ static void usb_stack_restart(void) {
         (unsigned)uxQueueMessagesWaiting(transport.tx_data_queue),
         (unsigned long)transport.rx_overruns
     );
+    /* Stop all new submissions before rebuilding the controller. The event
+     * callbacks from deinitialize/reinitialize are asynchronous relative to
+     * this task, so leaving CONFIGURED set lets old-session heartbeats race
+     * into a detached endpoint. */
+    xEventGroupClearBits(transport.events, WLH_USB_CONFIGURED_BIT);
+    xEventGroupSetBits(transport.events, WLH_USB_RESET_BIT);
     (void)usbd_deinitialize(WLH_USB_BUS_ID);
     vTaskDelay(pdMS_TO_TICKS(50u));
     usb_stack_register();
@@ -347,64 +361,82 @@ static void tx_task_main(void *argument) {
     tx_job_t job;
     (void)argument;
     for (;;) {
-        int status = 0;
-        EventBits_t bits = xEventGroupWaitBits(
-            transport.events,
-            WLH_USB_RESET_BIT,
-            pdTRUE,
-            pdFALSE,
-            pdMS_TO_TICKS(100u)
-        );
-        if ((bits & WLH_USB_RESET_BIT) != 0u) {
-            /* Bus reset/re-enumeration: queued frames belong to the dead
-             * session; complete them as failed in task context. */
-            flush_tx_queue(-1);
-            if (transport.on_reset != NULL)
-                transport.on_reset(transport.reset_context);
-            continue;
-        }
-        /* Control RPC/link frames must not wait behind a sustained Ethernet
-         * burst. Ethernet is best-effort; a delayed Hello/RPC response can
-         * otherwise time out the entire Host session. */
-        if (xQueueReceive(transport.tx_control_queue, &job, 0) != pdTRUE &&
-            xQueueReceive(transport.tx_data_queue, &job, pdMS_TO_TICKS(100u)) !=
-                pdTRUE)
-            continue;
-        if (job.frame == NULL)
-            break;
+        uint32_t notification = 0u;
+        (void)xTaskNotifyWait(0u, UINT32_MAX, &notification, portMAX_DELAY);
+        (void)notification;
 
-        xEventGroupWaitBits(
-            transport.events,
-            WLH_USB_CONFIGURED_BIT,
-            pdFALSE,
-            pdTRUE,
-            portMAX_DELAY
-        );
-        /* Drop stale IN completions from transfers that already timed out,
-         * so the wait below only observes the current transfer. */
-        (void)xSemaphoreTake(transport.tx_done, 0);
-        if (usbd_ep_start_write(
-                WLH_USB_BUS_ID, WLH_USB_EP_IN, job.frame, job.size
-            ) != 0) {
-            ESP_LOGW(
-                TAG, "bulk IN write rejected (%u bytes)", (unsigned)job.size
+        for (;;) {
+            int status = 0;
+            EventBits_t bits = xEventGroupWaitBits(
+                transport.events, WLH_USB_RESET_BIT, pdTRUE, pdFALSE, 0
             );
-            status = -1;
-        } else if (xSemaphoreTake(
-                       transport.tx_done, pdMS_TO_TICKS(WLH_USB_TX_TIMEOUT_MS)
-                   ) != pdTRUE) {
-            ESP_LOGW(
-                TAG, "bulk IN transfer timed out (%u bytes)", (unsigned)job.size
+            if ((bits & WLH_USB_RESET_BIT) != 0u) {
+                /* Bus reset/re-enumeration: queued frames belong to the dead
+                 * session; complete them as failed in task context. */
+                flush_tx_queue(WLH_COPROC_TX_CANCELLED);
+                if (transport.on_reset != NULL)
+                    transport.on_reset(transport.reset_context);
+                if ((xEventGroupGetBits(transport.events) &
+                     WLH_USB_CONFIGURED_BIT) != 0u) {
+                    (void)usbd_ep_start_read(
+                        WLH_USB_BUS_ID,
+                        WLH_USB_EP_OUT,
+                        out_chunk,
+                        sizeof(out_chunk)
+                    );
+                }
+                break;
+            }
+            /* Control RPC/link frames must not wait behind a sustained
+             * Ethernet burst. Process all work already admitted without a
+             * fixed polling delay; new submissions wake this task. */
+            if (xQueueReceive(transport.tx_control_queue, &job, 0) != pdTRUE &&
+                xQueueReceive(transport.tx_data_queue, &job, 0) != pdTRUE)
+                break;
+            if (job.frame == NULL)
+                return;
+
+            xEventGroupWaitBits(
+                transport.events,
+                WLH_USB_CONFIGURED_BIT,
+                pdFALSE,
+                pdTRUE,
+                portMAX_DELAY
             );
-            status = -1;
-        }
-        job.completion(job.completion_context, job.frame, job.size, status);
-        if (status != 0 && !atomic_exchange(&transport.restart_pending, true)) {
-            /* A failed transfer means the host went away without a bus
-             * reset, or the controller is wedged. Detach and re-attach to
-             * force a fresh enumeration; the Core enters FAILED on the
-             * completion above and restarts via the RESET event. */
-            usb_stack_restart();
+            /* Drop stale IN completions from transfers that already timed
+             * out, so the wait below only observes the current transfer. */
+            (void)xSemaphoreTake(transport.tx_done, 0);
+            if (usbd_ep_start_write(
+                    WLH_USB_BUS_ID, WLH_USB_EP_IN, job.frame, job.size
+                ) != 0) {
+                ESP_LOGW(
+                    TAG, "bulk IN write rejected (%u bytes)", (unsigned)job.size
+                );
+                status = -1;
+            } else if (xSemaphoreTake(
+                           transport.tx_done,
+                           pdMS_TO_TICKS(WLH_USB_TX_TIMEOUT_MS)
+                       ) != pdTRUE) {
+                ESP_LOGW(
+                    TAG,
+                    "bulk IN transfer timed out (%u bytes)",
+                    (unsigned)job.size
+                );
+                status = -1;
+            } else if ((xEventGroupGetBits(transport.events) &
+                        WLH_USB_RESET_BIT) != 0u) {
+                status = WLH_COPROC_TX_CANCELLED;
+            }
+            job.completion(job.completion_context, job.frame, job.size, status);
+            if (status != 0 &&
+                !atomic_exchange(&transport.restart_pending, true)) {
+                /* A failed or reset-cancelled active transfer can leave the
+                 * next Host process on the old device handle. Detach and
+                 * re-attach to force a fresh enumeration. The Core ignores a
+                 * cancelled completion and restarts exactly once when the
+                 * RESET event is drained below. */
+                usb_stack_restart();
+            }
         }
     }
 }
@@ -419,14 +451,34 @@ static void usb_event_handler(uint8_t busid, uint8_t event) {
     case USBD_EVENT_RESET:
         xEventGroupClearBitsFromISR(transport.events, WLH_USB_CONFIGURED_BIT);
         xEventGroupSetBitsFromISR(transport.events, WLH_USB_RESET_BIT, &woken);
+        /* Interrupt an active bulk-IN completion wait so the old session is
+         * torn down before a newly configured host can negotiate. */
+        if (transport.tx_done != NULL)
+            xSemaphoreGiveFromISR(transport.tx_done, &woken);
+        if (transport.tx_task != NULL) {
+            (void)xTaskNotifyFromISR(
+                transport.tx_task,
+                WLH_USB_TX_RESET_NOTIFICATION,
+                eSetBits,
+                &woken
+            );
+        }
         break;
     case USBD_EVENT_CONFIGURED:
+        if (!atomic_exchange(&transport.initial_configuration_seen, true)) {
+            xEventGroupClearBitsFromISR(transport.events, WLH_USB_RESET_BIT);
+            (void)usbd_ep_start_read(
+                busid, WLH_USB_EP_OUT, out_chunk, sizeof(out_chunk)
+            );
+        } else if ((xEventGroupGetBitsFromISR(transport.events) &
+                    WLH_USB_RESET_BIT) == 0u) {
+            (void)usbd_ep_start_read(
+                busid, WLH_USB_EP_OUT, out_chunk, sizeof(out_chunk)
+            );
+        }
         atomic_store(&transport.restart_pending, false);
         xEventGroupSetBitsFromISR(
             transport.events, WLH_USB_CONFIGURED_BIT, &woken
-        );
-        (void)usbd_ep_start_read(
-            busid, WLH_USB_EP_OUT, out_chunk, sizeof(out_chunk)
         );
         break;
     default:
@@ -482,7 +534,12 @@ int wlh_transport_start(const wlh_transport_config_t *config) {
     }
 
     if (xTaskCreate(
-            tx_task_main, "wlh-usb-tx", 4096u, NULL, 6, &transport.tx_task
+            tx_task_main,
+            "wlh-usb-tx",
+            4096u,
+            NULL,
+            WLH_USB_TX_TASK_PRIORITY,
+            &transport.tx_task
         ) != pdPASS ||
         xTaskCreate(
             rx_task_main, "wlh-usb-rx", 4096u, NULL, 6, &transport.rx_task
@@ -506,4 +563,8 @@ int wlh_transport_start(const wlh_transport_config_t *config) {
 
 size_t wlh_transport_max_frame_size(void) {
     return 4096u;
+}
+
+size_t wlh_transport_tx_capacity(void) {
+    return WLH_USB_DATA_TX_QUEUE_DEPTH;
 }

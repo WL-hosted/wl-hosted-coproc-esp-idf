@@ -414,3 +414,7 @@ int wlh_transport_start(const wlh_transport_config_t *config) {
 size_t wlh_transport_max_frame_size(void) {
     return WLH_SDIO_MAX_FRAME_SIZE;
 }
+
+size_t wlh_transport_tx_capacity(void) {
+    return CONFIG_WLH_SDIO_TX_QUEUE_DEPTH;
+}

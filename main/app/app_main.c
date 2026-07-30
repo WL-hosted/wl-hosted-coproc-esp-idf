@@ -148,8 +148,11 @@ void app_main(void) {
     }
     config.max_frame_size = wlh_transport_max_frame_size();
     config.heartbeat_interval_ms = 1000u;
-    config.initial_credit = 64u;
-    config.core_queue_depth = 16u;
+    /* Credit is the in-flight window for the data path. It must cover one
+     * bandwidth-delay product, or the sender stalls waiting for returns and
+     * throughput collapses to one frame per round trip. */
+    config.initial_credit = 256u;
+    config.core_queue_depth = 64u;
     config.stop_timeout_ms = 3000u;
     config.core_task = (wlh_osal_task_attributes_t){"wlh-core", 8192u, 7};
 

@@ -70,7 +70,8 @@ idf.py -B build-esp32s3 -DIDF_TARGET=esp32s3 build
 idf.py -B build-esp32c6 -DIDF_TARGET=esp32c6 build
 ```
 
-目标专用默认值位于 `sdkconfig.defaults.esp32s3` 和
+两种目标共用的系统默认值位于 `sdkconfig.defaults`；接口、接口参数和缓存
+大小等目标专用默认值位于 `sdkconfig.defaults.esp32s3` 和
 `sdkconfig.defaults.esp32c6`。也可以通过 `idf.py menuconfig` 在
 `WL-hosted Coprocessor Configuration` 中调整当前芯片支持的传输参数。
 
@@ -176,8 +177,8 @@ channel。
 - GET_INFO 的 `public_address` 来自 `esp_read_mac(ESP_MAC_BT)`；
   `hci_version`、`manufacturer_id`、`feature_bits` 无公开 API，保持 0。
 
-C6 因 BLE controller 使 app 超过 1 MB，target 默认值切换到 4 MB flash 的
-`SINGLE_APP_LARGE` 分区布局。
+两种目标均使用 4 MB flash 和 `partitions_ota.csv`，提供两个 1.5 MB OTA
+application slot。
 
 ### 逻辑 pin 表
 

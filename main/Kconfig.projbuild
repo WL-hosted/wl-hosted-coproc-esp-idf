@@ -69,8 +69,8 @@ menu "WL-hosted Coprocessor Configuration"
 
         config WLH_SDIO_TX_QUEUE_DEPTH
             int "SDIO TX queue depth"
-            range 2 32
-            default 8
+            range 16 32
+            default 16
 
         config WLH_SDIO_RX_BUFFER_COUNT
             int "SDIO RX DMA buffer count"

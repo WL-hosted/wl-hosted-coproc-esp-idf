@@ -151,9 +151,15 @@ void app_main(void) {
     /* Credit is the in-flight window for the data path. It must cover one
      * bandwidth-delay product, or the sender stalls waiting for returns and
      * throughput collapses to one frame per round trip. */
-    config.initial_credit = 256u;
+    config.initial_credit = wlh_wifi_backend_ethernet_rx_capacity();
     config.core_queue_depth = 64u;
     config.ethernet_tx_depth = (uint8_t)wlh_transport_tx_capacity();
+    /* TODO(wlh-p4-errata): ESP32-P4 rev1.3 corrupts instruction fetches under
+     * sustained SDMMC traffic. Aggregating Ethernet records raises CMD53 duty
+     * cycle enough to reproduce it even with CPU1 disabled and aligned DMA.
+     * Remove this limit only after an Espressif fix passes the four-direction
+     * P4+SDIO+C6 hardware matrix. */
+    config.ethernet_tx_aggregation_limit = 1u;
     config.stop_timeout_ms = 3000u;
     config.core_task = (wlh_osal_task_attributes_t){"wlh-core", 8192u, 7};
 

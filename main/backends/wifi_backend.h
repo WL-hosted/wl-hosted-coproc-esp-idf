@@ -33,14 +33,24 @@ int wlh_wifi_backend_start_ap(
 );
 int wlh_wifi_backend_stop_ap(void *context);
 
+uint32_t wlh_wifi_backend_ethernet_rx_capacity(void);
+
 /* wlh_coproc_ethernet_rx_fn: forwards a Host frame to the AP. Runs on the
  * Core task and returns immediately; frames are dropped when not
  * connected. */
-void wlh_wifi_backend_ethernet_tx(
-    void *context, const uint8_t *frame, size_t size
+wlh_coproc_ethernet_rx_result_t wlh_wifi_backend_ethernet_tx(
+    void *context,
+    uint32_t session_id,
+    uint8_t channel,
+    const uint8_t *frame,
+    size_t size
 );
-void wlh_wifi_backend_ethernet_ap_tx(
-    void *context, const uint8_t *frame, size_t size
+wlh_coproc_ethernet_rx_result_t wlh_wifi_backend_ethernet_ap_tx(
+    void *context,
+    uint32_t session_id,
+    uint8_t channel,
+    const uint8_t *frame,
+    size_t size
 );
 
 #ifdef __cplusplus

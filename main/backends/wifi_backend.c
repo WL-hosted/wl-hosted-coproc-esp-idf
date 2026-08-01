@@ -7,10 +7,15 @@
 #include "esp_private/wifi.h"
 #include "esp_wifi.h"
 #include "esp_wifi_types.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
 
 #define WLH_WIFI_SCAN_MAX_RESULTS 24u
 #define WLH_WIFI_AP_MAX_CLIENTS 10u
 #define WLH_WIFI_AP_DEFAULT_MAX_CLIENTS 4u
+#define WLH_WIFI_TX_QUEUE_DEPTH 32u
+#define WLH_WIFI_MAX_ETHERNET_FRAME_SIZE 1518u
 
 #define WIFI_SECURITY_OPEN 1u
 #define WIFI_SECURITY_WEP 2u
@@ -43,9 +48,21 @@ typedef struct wifi_backend {
     bool disconnect_locally;
     bool ap_active;
     uint32_t sta_reported_session_id;
+    QueueHandle_t sta_tx_free;
+    QueueHandle_t sta_tx_pending;
+    TaskHandle_t sta_tx_task;
 } wifi_backend_t;
 
+typedef struct wifi_tx_frame {
+    uint32_t session_id;
+    uint8_t channel;
+    wifi_interface_t interface;
+    size_t size;
+    uint8_t data[WLH_WIFI_MAX_ETHERNET_FRAME_SIZE];
+} wifi_tx_frame_t;
+
 static wifi_backend_t backend;
+static wifi_tx_frame_t sta_tx_pool[WLH_WIFI_TX_QUEUE_DEPTH];
 
 static uint32_t map_security(wifi_auth_mode_t mode) {
     switch (mode) {
@@ -128,15 +145,58 @@ static bool sta_reported_for_current_session(void) {
            backend.sta_reported_session_id == backend.coproc->session_id;
 }
 
-/* Temporary datapath diagnostics: throttle logs to the first few frames and
-   then every 100th to survive broadcast noise. */
-static uint32_t sta_rxcb_frames;
-static uint32_t sta_tx_frames;
 static uint32_t sta_tx_dropped;
 static uint32_t sta_tx_errors;
 
 static bool throttled_log(uint32_t count) {
     return count <= 5u || count % 100u == 0u;
+}
+
+static bool wifi_tx_interface_active(wifi_interface_t interface) {
+    return interface == WIFI_IF_AP ? backend.ap_active : backend.connected;
+}
+
+static void sta_tx_task_main(void *argument) {
+    (void)argument;
+    for (;;) {
+        wifi_tx_frame_t *frame = NULL;
+        esp_err_t result = ESP_FAIL;
+        if (xQueueReceive(backend.sta_tx_pending, &frame, portMAX_DELAY) !=
+                pdTRUE ||
+            frame == NULL)
+            continue;
+        while (wifi_tx_interface_active(frame->interface)) {
+            result = esp_wifi_internal_tx(
+                frame->interface, frame->data, (uint16_t)frame->size
+            );
+            if (result != ESP_ERR_NO_MEM)
+                break;
+            /* The Wi-Fi driver applies backpressure by exhausting its TX
+             * buffers. Keep the frame in this bounded worker instead of
+             * dropping it from the Core callback. */
+            vTaskDelay(1u);
+        }
+        if (result != ESP_OK && wifi_tx_interface_active(frame->interface)) {
+            ++sta_tx_errors;
+            if (throttled_log(sta_tx_errors))
+                ESP_LOGW(
+                    TAG,
+                    "datapath: wifi tx failed #%lu: %s",
+                    (unsigned long)sta_tx_errors,
+                    esp_err_to_name(result)
+                );
+        }
+        (void)wlh_coproc_ethernet_rx_complete(
+            backend.coproc,
+            frame->session_id,
+            frame->channel,
+            1u,
+            result == ESP_OK ? 0 : (int)result
+        );
+        configASSERT(
+            xQueueSend(backend.sta_tx_free, &frame, portMAX_DELAY) == pdTRUE
+        );
+    }
 }
 
 static bool sta_frame_for_host(const uint8_t *frame, uint16_t length) {
@@ -159,14 +219,6 @@ static esp_err_t sta_rx_callback(void *buffer, uint16_t length, void *eb) {
     /* Runs on the Wi-Fi task. The Core copies the frame into its bounded
      * queue, so the driver-owned RX buffer can be released immediately after
      * wlh_coproc_ethernet_sta_send returns. */
-    ++sta_rxcb_frames;
-    if (throttled_log(sta_rxcb_frames))
-        ESP_LOGI(
-            TAG,
-            "datapath: wifi rx -> host #%lu len=%u",
-            (unsigned long)sta_rxcb_frames,
-            (unsigned)length
-        );
     if (backend.coproc != NULL && buffer != NULL &&
         sta_frame_for_host(buffer, length)) {
         (void)wlh_coproc_ethernet_sta_send(
@@ -359,10 +411,31 @@ static void wifi_event_handler(
 
 int wlh_wifi_backend_init(wlh_coproc_t *coproc) {
     wifi_init_config_t config = WIFI_INIT_CONFIG_DEFAULT();
+    size_t index;
     if (coproc == NULL)
         return -1;
     memset(&backend, 0, sizeof(backend));
     backend.coproc = coproc;
+    backend.sta_tx_free =
+        xQueueCreate(WLH_WIFI_TX_QUEUE_DEPTH, sizeof(wifi_tx_frame_t *));
+    backend.sta_tx_pending =
+        xQueueCreate(WLH_WIFI_TX_QUEUE_DEPTH, sizeof(wifi_tx_frame_t *));
+    if (backend.sta_tx_free == NULL || backend.sta_tx_pending == NULL)
+        return -1;
+    for (index = 0u; index < WLH_WIFI_TX_QUEUE_DEPTH; ++index) {
+        wifi_tx_frame_t *frame = &sta_tx_pool[index];
+        if (xQueueSend(backend.sta_tx_free, &frame, 0) != pdTRUE)
+            return -1;
+    }
+    if (xTaskCreate(
+            sta_tx_task_main,
+            "wlh-wifi-tx",
+            4096u,
+            NULL,
+            7,
+            &backend.sta_tx_task
+        ) != pdPASS)
+        return -1;
     if (esp_wifi_init(&config) != ESP_OK ||
         esp_wifi_set_storage(WIFI_STORAGE_RAM) != ESP_OK ||
         esp_event_handler_register(
@@ -417,6 +490,16 @@ int wlh_wifi_backend_initialize(
     backend.initialize_operation_id = operation_id;
     if (esp_wifi_start() != ESP_OK) {
         backend.initialize_operation_id = 0u;
+        return -1;
+    }
+    /* Hosted Ethernet is an always-on data path. Modem power save adds
+     * hundreds of milliseconds of burst latency to TCP ACKs and can let SDIO
+     * RX traffic accumulate behind beacon sleep intervals. Match the
+     * esp-hosted-mcu coprocessor profile and keep the radio awake while the
+     * WL-hosted Wi-Fi service is active. */
+    if (esp_wifi_set_ps(WIFI_PS_NONE) != ESP_OK) {
+        backend.initialize_operation_id = 0u;
+        (void)esp_wifi_stop();
         return -1;
     }
     backend.driver_started = true;
@@ -633,51 +716,68 @@ int wlh_wifi_backend_stop_ap(void *context) {
     return 0;
 }
 
-void wlh_wifi_backend_ethernet_ap_tx(
-    void *context, const uint8_t *frame, size_t size
+static wlh_coproc_ethernet_rx_result_t submit_ethernet_tx(
+    uint32_t session_id,
+    uint8_t channel,
+    wifi_interface_t interface,
+    const uint8_t *frame,
+    size_t size,
+    bool active
 ) {
-    (void)context;
-    if (!backend.ap_active || frame == NULL || size == 0u || size > 1518u)
-        return;
-    (void)esp_wifi_internal_tx(WIFI_IF_AP, (void *)frame, (uint16_t)size);
-}
-
-void wlh_wifi_backend_ethernet_tx(
-    void *context, const uint8_t *frame, size_t size
-) {
-    esp_err_t result;
-    (void)context;
-    if (!backend.connected || frame == NULL || size == 0u || size > 1518u) {
+    wifi_tx_frame_t *pending = NULL;
+    if (!active || frame == NULL || size == 0u ||
+        size > WLH_WIFI_MAX_ETHERNET_FRAME_SIZE ||
+        xQueueReceive(backend.sta_tx_free, &pending, 0) != pdTRUE) {
         ++sta_tx_dropped;
         if (throttled_log(sta_tx_dropped))
             ESP_LOGW(
                 TAG,
                 "datapath: host->wifi drop #%lu connected=%d size=%u",
                 (unsigned long)sta_tx_dropped,
-                (int)backend.connected,
+                (int)active,
                 (unsigned)size
             );
-        return;
+        return WLH_COPROC_ETHERNET_RX_REJECTED;
     }
-    /* esp_wifi_internal_tx copies the frame into the Wi-Fi driver queue. */
-    result = esp_wifi_internal_tx(WIFI_IF_STA, (void *)frame, (uint16_t)size);
-    if (result != ESP_OK) {
-        ++sta_tx_errors;
-        if (throttled_log(sta_tx_errors))
-            ESP_LOGW(
-                TAG,
-                "datapath: wifi tx failed #%lu: %s",
-                (unsigned long)sta_tx_errors,
-                esp_err_to_name(result)
-            );
-        return;
+    pending->session_id = session_id;
+    pending->channel = channel;
+    pending->interface = interface;
+    pending->size = size;
+    memcpy(pending->data, frame, size);
+    if (xQueueSend(backend.sta_tx_pending, &pending, 0) != pdTRUE) {
+        ++sta_tx_dropped;
+        configASSERT(xQueueSend(backend.sta_tx_free, &pending, 0) == pdTRUE);
+        return WLH_COPROC_ETHERNET_RX_REJECTED;
     }
-    ++sta_tx_frames;
-    if (throttled_log(sta_tx_frames))
-        ESP_LOGI(
-            TAG,
-            "datapath: host -> wifi tx #%lu size=%u",
-            (unsigned long)sta_tx_frames,
-            (unsigned)size
-        );
+    return WLH_COPROC_ETHERNET_RX_PENDING;
+}
+
+wlh_coproc_ethernet_rx_result_t wlh_wifi_backend_ethernet_ap_tx(
+    void *context,
+    uint32_t session_id,
+    uint8_t channel,
+    const uint8_t *frame,
+    size_t size
+) {
+    (void)context;
+    return submit_ethernet_tx(
+        session_id, channel, WIFI_IF_AP, frame, size, backend.ap_active
+    );
+}
+
+wlh_coproc_ethernet_rx_result_t wlh_wifi_backend_ethernet_tx(
+    void *context,
+    uint32_t session_id,
+    uint8_t channel,
+    const uint8_t *frame,
+    size_t size
+) {
+    (void)context;
+    return submit_ethernet_tx(
+        session_id, channel, WIFI_IF_STA, frame, size, backend.connected
+    );
+}
+
+uint32_t wlh_wifi_backend_ethernet_rx_capacity(void) {
+    return WLH_WIFI_TX_QUEUE_DEPTH;
 }

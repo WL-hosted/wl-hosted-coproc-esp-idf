@@ -18,6 +18,13 @@
 #define WLH_SDIO_RESET_EVENT (1u << 0)
 #define WLH_SDIO_LINK_RESET_INTERRUPT 0u
 #define WLH_SDIO_TX_WAIT_MS 1000u
+/* Link control must remain admissible while Wi-Fi Ethernet fills the SDIO
+ * data window.  In particular, a deferred CreditUpdate would otherwise be
+ * rejected synchronously, which the Core correctly treats as a transport
+ * failure and tears down the active session. */
+#define WLH_SDIO_CONTROL_TX_QUEUE_DEPTH 8u
+#define WLH_SDIO_DATA_TX_QUEUE_DEPTH                                           \
+    (CONFIG_WLH_SDIO_TX_QUEUE_DEPTH - WLH_SDIO_CONTROL_TX_QUEUE_DEPTH)
 
 static const char *TAG = "wlh-sdio";
 
@@ -39,10 +46,13 @@ typedef struct sdio_transport {
     size_t max_frame_size;
     wlh_transport_reset_fn on_reset;
     void *reset_context;
-    QueueHandle_t tx_queue;
+    QueueHandle_t tx_control_queue;
+    QueueHandle_t tx_data_queue;
+    QueueSetHandle_t tx_queue_set;
     EventGroupHandle_t events;
     SemaphoreHandle_t state_lock;
     SemaphoreHandle_t tx_window;
+    SemaphoreHandle_t tx_data_window;
     TaskHandle_t tx_task;
     TaskHandle_t tx_done_task;
     TaskHandle_t rx_task;
@@ -55,6 +65,12 @@ typedef struct sdio_transport {
 static sdio_transport_t transport;
 static DMA_ATTR uint8_t
     rx_buffers[CONFIG_WLH_SDIO_RX_BUFFER_COUNT][WLH_SDIO_MAX_FRAME_SIZE];
+
+static bool is_control_frame(const uint8_t *frame, size_t size) {
+    return frame != NULL && size >= WLH_FRAME_HEADER_SIZE &&
+           (frame[4] == WLH_CHANNEL_LINK_CONTROL ||
+            frame[4] == WLH_CHANNEL_CONTROL_RPC);
+}
 
 static sdio_slave_timing_t configured_timing(void) {
 #if CONFIG_WLH_SDIO_TIMING_PSEND_PSAMPLE
@@ -84,10 +100,22 @@ static void complete_job(tx_job_t *job, int status) {
         job->completion(job->completion_context, job->frame, job->size, status);
 }
 
+static bool is_data_job(const tx_job_t *job) {
+    return !is_control_frame(job->frame, job->size);
+}
+
 static void flush_tx_queue(int status) {
     tx_job_t job;
-    while (xQueueReceive(transport.tx_queue, &job, 0) == pdTRUE)
-        complete_job(&job, status);
+    QueueHandle_t queues[] = {
+        transport.tx_control_queue,
+        transport.tx_data_queue,
+    };
+    size_t index;
+
+    for (index = 0u; index < sizeof(queues) / sizeof(queues[0]); ++index) {
+        while (xQueueReceive(queues[index], &job, 0) == pdTRUE)
+            complete_job(&job, status);
+    }
 }
 
 static tx_pending_t *find_free_pending(void) {
@@ -107,6 +135,7 @@ int wlh_transport_submit_tx(
     void *completion_context
 ) {
     tx_job_t job;
+    QueueHandle_t queue;
     (void)context;
     if (frame == NULL || size == 0u || size > WLH_SDIO_MAX_FRAME_SIZE ||
         atomic_load(&transport.resetting))
@@ -115,8 +144,15 @@ int wlh_transport_submit_tx(
     job.size = size;
     job.completion = completion;
     job.completion_context = completion_context;
-    if (xQueueSend(transport.tx_queue, &job, 0) != pdTRUE) {
-        ESP_LOGW(TAG, "tx queue full: rejecting %u bytes", (unsigned)size);
+    queue = is_control_frame(frame, size) ? transport.tx_control_queue
+                                          : transport.tx_data_queue;
+    if (xQueueSend(queue, &job, 0) != pdTRUE) {
+        ESP_LOGW(
+            TAG,
+            "%s tx queue full: rejecting %u bytes",
+            is_control_frame(frame, size) ? "control" : "data",
+            (unsigned)size
+        );
         return -1;
     }
     return 0;
@@ -130,14 +166,33 @@ static void tx_task_main(void *argument) {
         tx_pending_t *pending;
         esp_err_t result;
 
-        if (xQueueReceive(transport.tx_queue, &job, portMAX_DELAY) != pdTRUE)
+        /* Serve control frames before Ethernet so link credits, heartbeats,
+         * and RPC replies are never stuck behind a sustained Wi-Fi burst. */
+        (void)xQueueSelectFromSet(transport.tx_queue_set, portMAX_DELAY);
+        if (xSemaphoreTake(transport.tx_window, 0) != pdTRUE) {
+            /* Do not remove a queued job while the driver is full: that would
+             * make a data job block later control traffic in this task. */
+            vTaskDelay(1u);
             continue;
-        if (xSemaphoreTake(transport.tx_window, portMAX_DELAY) != pdTRUE) {
-            complete_job(&job, -1);
-            continue;
+        }
+        if (xQueueReceive(transport.tx_control_queue, &job, 0) != pdTRUE) {
+            /* Data may only occupy the non-reserved part of the SDIO driver
+             * queue, preserving descriptors for link control and RPC. */
+            if (xSemaphoreTake(transport.tx_data_window, 0) != pdTRUE) {
+                xSemaphoreGive(transport.tx_window);
+                vTaskDelay(1u);
+                continue;
+            }
+            if (xQueueReceive(transport.tx_data_queue, &job, 0) != pdTRUE) {
+                xSemaphoreGive(transport.tx_data_window);
+                xSemaphoreGive(transport.tx_window);
+                continue;
+            }
         }
         if (atomic_load(&transport.resetting)) {
             complete_job(&job, -1);
+            if (is_data_job(&job))
+                xSemaphoreGive(transport.tx_data_window);
             xSemaphoreGive(transport.tx_window);
             continue;
         }
@@ -150,6 +205,8 @@ static void tx_task_main(void *argument) {
                 (unsigned)job.size
             );
             complete_job(&job, -1);
+            if (is_data_job(&job))
+                xSemaphoreGive(transport.tx_data_window);
             xSemaphoreGive(transport.tx_window);
             continue;
         }
@@ -161,6 +218,8 @@ static void tx_task_main(void *argument) {
             xSemaphoreGive(transport.state_lock);
             heap_caps_free(dma_frame);
             complete_job(&job, -1);
+            if (is_data_job(&job))
+                xSemaphoreGive(transport.tx_data_window);
             xSemaphoreGive(transport.tx_window);
             continue;
         }
@@ -176,6 +235,8 @@ static void tx_task_main(void *argument) {
             heap_caps_free(dma_frame);
             ESP_LOGW(TAG, "SDIO TX queue failed: %s", esp_err_to_name(result));
             complete_job(&job, -1);
+            if (is_data_job(&job))
+                xSemaphoreGive(transport.tx_data_window);
             xSemaphoreGive(transport.tx_window);
             continue;
         }
@@ -207,6 +268,8 @@ static void tx_done_task_main(void *argument) {
         if (dma_frame != NULL) {
             heap_caps_free(dma_frame);
             complete_job(&job, 0);
+            if (is_data_job(&job))
+                xSemaphoreGive(transport.tx_data_window);
             xSemaphoreGive(transport.tx_window);
         }
     }
@@ -305,6 +368,8 @@ static void reset_task_main(void *argument) {
         for (index = 0u; index < count; ++index) {
             heap_caps_free(dma_frames[index]);
             complete_job(&jobs[index], -1);
+            if (is_data_job(&jobs[index]))
+                xSemaphoreGive(transport.tx_data_window);
             /* Return the window token held by each reclaimed in-flight
                job so the TX path restarts with a full window. */
             xSemaphoreGive(transport.tx_window);
@@ -363,17 +428,31 @@ int wlh_transport_start(const wlh_transport_config_t *config) {
     transport.max_frame_size = config->max_frame_size;
     transport.on_reset = config->on_reset;
     transport.reset_context = config->reset_context;
-    transport.tx_queue =
-        xQueueCreate(CONFIG_WLH_SDIO_TX_QUEUE_DEPTH, sizeof(tx_job_t));
+    transport.tx_control_queue =
+        xQueueCreate(WLH_SDIO_CONTROL_TX_QUEUE_DEPTH, sizeof(tx_job_t));
+    transport.tx_data_queue =
+        xQueueCreate(WLH_SDIO_DATA_TX_QUEUE_DEPTH, sizeof(tx_job_t));
+    transport.tx_queue_set = xQueueCreateSet(CONFIG_WLH_SDIO_TX_QUEUE_DEPTH);
     transport.events = xEventGroupCreate();
     transport.state_lock = xSemaphoreCreateMutex();
     transport.tx_window = xSemaphoreCreateCounting(
         CONFIG_WLH_SDIO_TX_QUEUE_DEPTH, CONFIG_WLH_SDIO_TX_QUEUE_DEPTH
     );
-    if (transport.tx_queue == NULL || transport.events == NULL ||
+    transport.tx_data_window = xSemaphoreCreateCounting(
+        WLH_SDIO_DATA_TX_QUEUE_DEPTH, WLH_SDIO_DATA_TX_QUEUE_DEPTH
+    );
+    if (transport.tx_control_queue == NULL || transport.tx_data_queue == NULL ||
+        transport.tx_queue_set == NULL || transport.events == NULL ||
         transport.state_lock == NULL || transport.tx_window == NULL ||
-        initialize_driver() != 0) {
+        transport.tx_data_window == NULL || initialize_driver() != 0) {
         ESP_LOGE(TAG, "SDIO transport initialization failed");
+        return -1;
+    }
+    if (xQueueAddToSet(transport.tx_control_queue, transport.tx_queue_set) !=
+            pdPASS ||
+        xQueueAddToSet(transport.tx_data_queue, transport.tx_queue_set) !=
+            pdPASS) {
+        ESP_LOGE(TAG, "failed to create SDIO TX queue set");
         return -1;
     }
     if (xTaskCreate(
@@ -403,9 +482,10 @@ int wlh_transport_start(const wlh_transport_config_t *config) {
     }
     ESP_LOGI(
         TAG,
-        "SDIO slave started: max_frame=%u txq=%u rx_buffers=%u",
+        "SDIO slave started: max_frame=%u txq=%u+%u rx_buffers=%u",
         (unsigned)transport.max_frame_size,
-        (unsigned)CONFIG_WLH_SDIO_TX_QUEUE_DEPTH,
+        (unsigned)WLH_SDIO_CONTROL_TX_QUEUE_DEPTH,
+        (unsigned)WLH_SDIO_DATA_TX_QUEUE_DEPTH,
         (unsigned)CONFIG_WLH_SDIO_RX_BUFFER_COUNT
     );
     return 0;
@@ -416,5 +496,5 @@ size_t wlh_transport_max_frame_size(void) {
 }
 
 size_t wlh_transport_tx_capacity(void) {
-    return CONFIG_WLH_SDIO_TX_QUEUE_DEPTH;
+    return WLH_SDIO_DATA_TX_QUEUE_DEPTH;
 }

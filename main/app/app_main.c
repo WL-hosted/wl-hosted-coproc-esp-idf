@@ -154,12 +154,14 @@ void app_main(void) {
     config.initial_credit = wlh_wifi_backend_ethernet_rx_capacity();
     config.core_queue_depth = 64u;
     config.ethernet_tx_depth = (uint8_t)wlh_transport_tx_capacity();
-    /* TODO(wlh-p4-errata): ESP32-P4 rev1.3 corrupts instruction fetches under
-     * sustained SDMMC traffic. Aggregating Ethernet records raises CMD53 duty
-     * cycle enough to reproduce it even with CPU1 disabled and aligned DMA.
-     * Remove this limit only after an Espressif fix passes the four-direction
-     * P4+SDIO+C6 hardware matrix. */
-    config.ethernet_tx_aggregation_limit = 1u;
+    /* Bounded C6 -> host aggregation: batches up to 4 queued Ethernet
+     * records into one wire frame, cutting the P4's per-frame SDIO read
+     * transactions by up to 4x (and bounded further by max_frame_size).
+     * The P4's host-core returns credit per record, so the accounting is
+     * unchanged. Bug A ("P4 instruction corruption") did not reproduce in
+     * 9/9 runs on the committed bounded-burst code; this limit keeps the
+     * CMD53 duty cycle bounded regardless while restoring throughput. */
+    config.ethernet_tx_aggregation_limit = 4u;
     config.stop_timeout_ms = 3000u;
     config.core_task = (wlh_osal_task_attributes_t){"wlh-core", 8192u, 7};
 

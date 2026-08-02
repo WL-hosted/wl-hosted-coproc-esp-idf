@@ -117,7 +117,7 @@ void app_main(void) {
     memset(&config, 0, sizeof(config));
     config.port.context = NULL;
     config.port.submit_tx = wlh_transport_submit_tx;
-    config.port.ethernet_rx = wlh_wifi_backend_ethernet_tx;
+    config.port.ethernet_sta_rx = wlh_wifi_backend_ethernet_tx;
     config.port.ethernet_ap_rx = wlh_wifi_backend_ethernet_ap_tx;
     config.buffers = (wlh_coproc_buffer_ops_t){NULL, buffer_alloc, buffer_free};
     config.osal = wlh_freertos_osal_ops(&freertos_osal);

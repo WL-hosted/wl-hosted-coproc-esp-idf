@@ -14,6 +14,11 @@
 #define WLH_WIFI_SCAN_MAX_RESULTS 24u
 #define WLH_WIFI_AP_MAX_CLIENTS 10u
 #define WLH_WIFI_AP_DEFAULT_MAX_CLIENTS 4u
+/* The pool depth is the P4's in-flight window AND the C6's TX queueing
+ * delay. A 48-frame pool (72.9 KB) exceeds the P4's 64 KB lwIP TCP window,
+ * so under TCP the pool can never drain and its queueing delay (RTT ~86 ms
+ * at 8 Mbps) caps the sender near ~6 Mbps. 32 frames (48.6 KB) leaves the
+ * window room to drive ~20 Mbps. */
 #define WLH_WIFI_TX_QUEUE_DEPTH 32u
 #define WLH_WIFI_MAX_ETHERNET_FRAME_SIZE 1518u
 

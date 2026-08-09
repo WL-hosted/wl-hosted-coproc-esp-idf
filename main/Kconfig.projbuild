@@ -4,6 +4,7 @@ menu "WL-hosted Coprocessor Configuration"
         prompt "Host transport"
         default WLH_TRANSPORT_USB if IDF_TARGET_ESP32S3
         default WLH_TRANSPORT_SDIO if IDF_TARGET_ESP32C6
+        default WLH_TRANSPORT_SDIO if IDF_TARGET_ESP32C5
 
         config WLH_TRANSPORT_USB
             bool "USB bulk"
@@ -11,7 +12,7 @@ menu "WL-hosted Coprocessor Configuration"
 
         config WLH_TRANSPORT_SDIO
             bool "SDIO slave"
-            depends on IDF_TARGET_ESP32C6 && SOC_SDIO_SLAVE_SUPPORTED
+            depends on (IDF_TARGET_ESP32C6 || IDF_TARGET_ESP32C5) && SOC_SDIO_SLAVE_SUPPORTED
     endchoice
 
     config WLH_ENABLE_BLUETOOTH_CONTROLLER

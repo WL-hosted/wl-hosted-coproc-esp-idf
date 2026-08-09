@@ -35,6 +35,21 @@ static const wlh_pin_descriptor_t pins[] = {
     {7u, GPIO_NUM_11, false, ADC_CHANNEL_0},
 };
 
+#elif CONFIG_IDF_TARGET_ESP32C5
+
+/* SDIO slave occupies GPIO7-10 and 13/14; flash takes GPIO15-18, 20-22;
+ * GPIO2 and 3 are strapping pins; GPIO19 is the VDD_SPI power pin. */
+static const wlh_pin_descriptor_t pins[] = {
+    {0u, GPIO_NUM_0, false, ADC_CHANNEL_0},
+    {1u, GPIO_NUM_1, true, ADC_CHANNEL_0},
+    {2u, GPIO_NUM_4, true, ADC_CHANNEL_3},
+    {3u, GPIO_NUM_5, true, ADC_CHANNEL_4},
+    {4u, GPIO_NUM_6, true, ADC_CHANNEL_5},
+    {5u, GPIO_NUM_11, false, ADC_CHANNEL_0},
+    {6u, GPIO_NUM_12, false, ADC_CHANNEL_0},
+    {7u, GPIO_NUM_23, false, ADC_CHANNEL_0},
+};
+
 #else
 #error "No WL-hosted pin profile for this target"
 #endif

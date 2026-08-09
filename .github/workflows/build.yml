@@ -23,6 +23,8 @@ jobs:
             transport: usb
           - target: esp32c6
             transport: sdio
+          - target: esp32c5
+            transport: sdio
 
     steps:
       - name: Check out repository and submodules
@@ -47,7 +49,7 @@ jobs:
             reconfigure build
 
       - name: Verify dependency locks
-        run: git -c safe.directory='*' diff --no-renames --exit-code -- dependencies.lock.esp32s3 dependencies.lock.esp32c6
+        run: git -c safe.directory='*' diff --no-renames --exit-code -- dependencies.lock.esp32s3 dependencies.lock.esp32c6 dependencies.lock.esp32c5
 
       - name: Collect firmware
         env:

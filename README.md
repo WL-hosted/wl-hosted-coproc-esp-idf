@@ -8,6 +8,7 @@ Bluetooth Controller 后端，并支持两种硬件传输：
 |---|---|---|---:|
 | ESP32-S3 | CherryUSB vendor bulk | `espressif.esp32s3.coreboard.usb-wifi-ble` | 4096 |
 | ESP32-C6 | ESP-IDF SDIO Slave | `espressif.esp32c6.sdio-wifi-ble` | 4092 |
+| ESP32-C5 | ESP-IDF SDIO Slave | `espressif.esp32c5.sdio-wifi-ble` | 4092 |
 
 Profile 名中的 `-ble` 后缀表示固件公布 Bluetooth Controller Service
 （`0x0003`）和 HCI Raw Channel（`0x04`）。Host 通过 Hello 广告中的
@@ -16,18 +17,20 @@ Service/Channel 表检测该能力，不解析 profile 字符串；关闭
 Hello 不公布 Bluetooth Service/Channel，行为与 Wi-Fi-only 固件一致。
 
 ESP32-S3 没有 SDIO Slave 外设，因此不能在同一块 S3 硬件上切换为 SDIO。
-Kconfig 会根据目标芯片只显示硬件支持的传输：S3 默认为 USB，C6 默认为
-SDIO。
+ESP32-C5 的 BLE 控制器由 NimBLE controller 实现，但向应用层暴露与 S3/C6
+相同的 `esp_bt_controller_*` + `esp_vhci_host_*` API，Bluetooth Controller
+Service 原样可用。Kconfig 会根据目标芯片只显示硬件支持的传输：S3 默认为
+USB，C6 和 C5 默认为 SDIO。
 
 ```text
 Host
   ↕ 原始 WL-hosted frame
 ESP-IDF Adapter
-  ├─ USB bulk（ESP32-S3）或 SDIO Slave（ESP32-C6）
+  ├─ USB bulk（ESP32-S3）或 SDIO Slave（ESP32-C6 / ESP32-C5）
   ├─ core/coproc-core（link/session/credit/RPC）
   ├─ core/common FreeRTOS OSAL
   ├─ esp_wifi STA/AP/SoftAP backend
-  └─ ESP VHCI Bluetooth Controller backend（controller-only，BLE）
+  └─ ESP VHCI Bluetooth Controller backend（controller-only，BLE；S3 / C6 / C5）
 ```
 
 Simulator IPC sideband 不进入真实硬件传输。USB 和 SDIO 都直接承载标准
@@ -63,22 +66,32 @@ idf.py set-target esp32c6
 idf.py build
 ```
 
-如果在同一工作树中交替构建两个目标，建议使用独立目录：
+构建 ESP32-C5 SDIO 固件：
+
+```sh
+idf.py set-target esp32c5
+idf.py build
+```
+
+如果在同一工作树中交替构建多个目标，建议使用独立目录：
 
 ```sh
 idf.py -B build-esp32s3 -DIDF_TARGET=esp32s3 build
 idf.py -B build-esp32c6 -DIDF_TARGET=esp32c6 build
+idf.py -B build-esp32c5 -DIDF_TARGET=esp32c5 build
 ```
 
 两种目标共用的系统默认值位于 `sdkconfig.defaults`；接口、接口参数和缓存
-大小等目标专用默认值位于 `sdkconfig.defaults.esp32s3` 和
-`sdkconfig.defaults.esp32c6`。也可以通过 `idf.py menuconfig` 在
-`WL-hosted Coprocessor Configuration` 中调整当前芯片支持的传输参数。
+大小等目标专用默认值位于 `sdkconfig.defaults.esp32s3`、
+`sdkconfig.defaults.esp32c6` 和 `sdkconfig.defaults.esp32c5`。也可以通过
+`idf.py menuconfig` 在 `WL-hosted Coprocessor Configuration` 中调整当前芯片
+支持的传输参数。
 
 依赖锁按目标拆分为：
 
 - `dependencies.lock.esp32s3`：ESP-IDF + CherryUSB；
-- `dependencies.lock.esp32c6`：ESP-IDF。
+- `dependencies.lock.esp32c6`：ESP-IDF；
+- `dependencies.lock.esp32c5`：ESP-IDF。
 
 ## 传输
 
@@ -99,17 +112,19 @@ USB 是字节流，packet 边界没有 frame 语义；Adapter 根据 24-byte wir
 
 ### SDIO
 
-ESP32-C6 使用 Function 1、4-bit、512-byte block 和 packet sending mode。
-每个 SDIO transaction 精确包含一个完整原始 WL-hosted frame，不增加
-ESP-Hosted MCU 的私有 header 或 checksum。
+ESP32-C6 和 ESP32-C5 使用 Function 1、4-bit、512-byte block 和 packet
+sending mode。每个 SDIO transaction 精确包含一个完整原始 WL-hosted frame，
+不增加 ESP-Hosted MCU 的私有 header 或 checksum。
 
 ESP-IDF SDIO Slave 单次 TX 上限为 4092 bytes，因此 SDIO profile 的
 `max_frame_size` 也是 4092。RX 使用预注册 DMA buffer，TX 使用有界队列和
 DMA bounce buffer。
 
-ESP32-C6 固定引脚、外部上拉、时序和 reset 约定见
-[SDIO profile](docs/sdio-profile.md)。当前仓库只实现 Coprocessor 侧，
-匹配的 Host SDIO Master 不在本仓库中。
+ESP32-C6（CLK=19, CMD=18, D0=20, D1=21, D2=22, D3=23）与 ESP32-C5
+（CLK=9, CMD=10, D0=8, D1=7, D2=14, D3=13，且 GPIO13/14 与 USB PHY 复用）
+的固定引脚、外部上拉、时序和 reset 约定见
+[SDIO profile](docs/sdio-profile.md)。当前仓库只实现
+Coprocessor 侧，匹配的 Host SDIO Master 不在本仓库中。
 
 ## 代码结构
 
@@ -121,7 +136,7 @@ main/
 ├─ transports/
 │  ├─ transport.h   # Adapter 内部统一 transport 接口
 │  ├─ usb/          # ESP32-S3 CherryUSB bulk
-│  └─ sdio/         # ESP32-C6 SDIO Slave
+│  └─ sdio/         # ESP32-C6 / ESP32-C5 SDIO Slave
 ├─ CMakeLists.txt
 ├─ Kconfig.projbuild
 └─ idf_component.yml
@@ -177,7 +192,7 @@ channel。
 - GET_INFO 的 `public_address` 来自 `esp_read_mac(ESP_MAC_BT)`；
   `hci_version`、`manufacturer_id`、`feature_bits` 无公开 API，保持 0。
 
-两种目标均使用 4 MB flash 和 `partitions_ota.csv`，提供两个 1.5 MB OTA
+三种目标均使用 4 MB flash 和 `partitions_ota.csv`，提供两个 1.5 MB OTA
 application slot。
 
 ### 逻辑 pin 表
@@ -186,16 +201,16 @@ IO 和 ADC 的 `pin_id` 是 profile 定义的逻辑编号，不是厂商 GPIO �
 `main/services/pin_profile.c` 中按 target 编译，被 transport、flash、PSRAM、
 strapping 和 USB-JTAG 占用的引脚不会出现在表里，host 无法通过 IO 服务扰乱链路。
 
-| 逻辑 pin | ESP32-S3 (USB) | ESP32-C6 (SDIO) |
-|---:|---|---|
-| 0 | GPIO4 · ADC1_CH3 | GPIO0 · ADC1_CH0 |
-| 1 | GPIO5 · ADC1_CH4 | GPIO1 · ADC1_CH1 |
-| 2 | GPIO6 · ADC1_CH5 | GPIO2 · ADC1_CH2 |
-| 3 | GPIO7 · ADC1_CH6 | GPIO3 · ADC1_CH3 |
-| 4 | GPIO15 | GPIO6 · ADC1_CH6 |
-| 5 | GPIO16 | GPIO7 |
-| 6 | GPIO17 | GPIO10 |
-| 7 | GPIO18 | GPIO11 |
+| 逻辑 pin | ESP32-S3 (USB) | ESP32-C6 (SDIO) | ESP32-C5 (SDIO) |
+|---:|---|---|---|
+| 0 | GPIO4 · ADC1_CH3 | GPIO0 · ADC1_CH0 | GPIO0 |
+| 1 | GPIO5 · ADC1_CH4 | GPIO1 · ADC1_CH1 | GPIO1 · ADC1_CH0 |
+| 2 | GPIO6 · ADC1_CH5 | GPIO2 · ADC1_CH2 | GPIO4 · ADC1_CH3 |
+| 3 | GPIO7 · ADC1_CH6 | GPIO3 · ADC1_CH3 | GPIO5 · ADC1_CH4 |
+| 4 | GPIO15 | GPIO6 · ADC1_CH6 | GPIO6 · ADC1_CH5 |
+| 5 | GPIO16 | GPIO7 | GPIO11 |
+| 6 | GPIO17 | GPIO10 | GPIO12 |
+| 7 | GPIO18 | GPIO11 | GPIO23 |
 
 只暴露 ADC1：Wi-Fi 运行期间 ADC2 不可用。无 ADC 能力的 pin 返回
 `PERIPHERAL/NOT_SUPPORTED`，表外的 pin 返回 `PERIPHERAL/NOT_FOUND`。
@@ -217,9 +232,10 @@ ESP-IDF 的 NVS entry 名上限是 15 字符，而协议允许 64 字节 key。�
 GitHub Actions 会在 ESP-IDF 5.5.2 容器中并行构建：
 
 - ESP32-S3 + USB；
-- ESP32-C6 + SDIO。
+- ESP32-C6 + SDIO；
+- ESP32-C5 + SDIO。
 
-两种固件的 bootloader、partition table、application binary、ELF、map、
+三种固件的 bootloader、partition table、application binary、ELF、map、
 flash arguments 和 sdkconfig 会作为 artifact 上传。
 
 从多仓库工作区根目录格式化：

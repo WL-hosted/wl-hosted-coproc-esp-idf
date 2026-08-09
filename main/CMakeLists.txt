@@ -35,7 +35,7 @@ if(CONFIG_WLH_TRANSPORT_USB OR
     )
 elseif(CONFIG_WLH_TRANSPORT_SDIO OR
        (NOT DEFINED CONFIG_WLH_TRANSPORT_SDIO AND
-        IDF_TARGET STREQUAL "esp32c6"))
+        (IDF_TARGET STREQUAL "esp32c6" OR IDF_TARGET STREQUAL "esp32c5")))
     list(APPEND wlh_sources "transports/sdio/transport_sdio.c")
     list(APPEND wlh_private_requirements esp_driver_sdio)
 else()
